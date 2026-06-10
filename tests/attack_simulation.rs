@@ -296,7 +296,17 @@ fn fence_anchor_survives_cwd_drift() {
 
 #[test]
 fn fence_cd_back_to_repo_root_allowed() {
-    let root = create_policy_dir("version: 1\nblocklist: []\nfence:\n  enabled: true");
+    // Bash command paths under /tmp are filtered as benign before the fence
+    // runs (is_benign_path), so this repo must live outside /tmp for the
+    // fence to be exercised at all.
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(base).unwrap();
+    let root = tempfile::tempdir_in(base).unwrap();
+    std::fs::write(
+        root.path().join("railguard.yaml"),
+        "version: 1\nblocklist: []\nfence:\n  enabled: true",
+    )
+    .unwrap();
     std::fs::create_dir_all(root.path().join(".git")).unwrap();
     let nested = root.path().join("packages/app");
     std::fs::create_dir_all(&nested).unwrap();
