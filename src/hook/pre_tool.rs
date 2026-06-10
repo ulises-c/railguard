@@ -34,11 +34,19 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
     let tool_input = input.tool_input.clone().unwrap_or_default();
     let cwd = Path::new(&input.cwd);
 
-    // Load persistent session state
-    let state_dir = cwd.join(".railguard/state");
+    // Load persistent session state (walk up — the shell cwd persists across
+    // tool calls and may have drifted below the project root)
+    let state_dir = SessionState::locate_state_dir(cwd, &input.session_id);
     let mut state = SessionState::load(&state_dir, &input.session_id);
     state.resolve_pending_approval();
     state.increment_tool_call();
+
+    // The fence anchors to the session's project root, not the per-call cwd.
+    // Anchor here for sessions that never ran the SessionStart hook.
+    let fence_root = state
+        .project_root
+        .get_or_insert_with(|| SessionState::find_project_root(cwd).display().to_string())
+        .clone();
 
     // If session was previously terminated, ask user before resuming
     if state.terminated {
@@ -318,7 +326,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
         if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
             let paths = evasion::extract_paths_from_command(cmd);
             for path in &paths {
-                match check_path(&policy.fence, path, &input.cwd) {
+                match check_path(&policy.fence, path, &fence_root) {
                     PathCheck::Allow => {}
                     PathCheck::Denied(reason) => {
                         let keywords = extract_keywords(cmd);
@@ -360,7 +368,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             }
         }
     } else if let Some(file_path) = extract_file_path(tool_name, &tool_input) {
-        match check_path(&policy.fence, &file_path, &input.cwd) {
+        match check_path(&policy.fence, &file_path, &fence_root) {
             PathCheck::Allow => {}
             PathCheck::Denied(reason) => {
                 let _ = state.save(&state_dir);

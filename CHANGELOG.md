@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.5.1] - 2026-03-22
+## [Unreleased]
+
+### Fixed
+
+- **Path fence anchors to a session project root instead of the per-call cwd** (#4) — Claude Code's shell working directory persists across tool calls, so a `cd` into a nested directory re-anchored the fence there and made repo-root paths "outside the project", prompting for approval on every `cd` back up. The fence now anchors once per session: `SessionStart` captures the project root (nearest ancestor with `.git`, falling back to the launch cwd) and persists it in session state; `PreToolUse` evaluates the fence against that root. Sessions without a SessionStart hook anchor on their first tool call. Session state is also discovered by walking up from the current cwd, so threat/approval state survives cwd drift instead of silently resetting.
 
 ### Fixed
 

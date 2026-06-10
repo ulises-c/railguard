@@ -59,7 +59,8 @@ pub fn run(event: &str) -> i32 {
 
             // If termination requested, flush output first then kill
             if let Some(req) = result.terminate {
-                let state_dir = cwd.join(".railguard/state");
+                let state_dir =
+                    crate::threat::state::SessionState::locate_state_dir(cwd, &input.session_id);
                 let trace_dir = crate::trace::logger::global_trace_dir();
                 let mut state = req.state;
                 terminate_session(&mut state, &req.tier, &req.command, &state_dir, &trace_dir);

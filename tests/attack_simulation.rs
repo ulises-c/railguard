@@ -262,6 +262,87 @@ fn fence_write_to_aws_credentials() {
     assert!(output_contains_deny(&stdout), "writing to ~/.aws should be blocked by fence");
 }
 
+// Issue #4: the fence anchors to the project root captured at SessionStart.
+// The shell cwd persists across tool calls, so after a `cd` into a nested dir
+// the per-call cwd drifts — repo-root paths must remain in-project.
+#[test]
+fn fence_anchor_survives_cwd_drift() {
+    let root = create_policy_dir("version: 1\nblocklist: []\nfence:\n  enabled: true");
+    std::fs::create_dir_all(root.path().join(".git")).unwrap();
+    let nested = root.path().join("packages/app");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let session_start = serde_json::json!({
+        "session_id": "fence-anchor-drift",
+        "cwd": root.path().to_str().unwrap(),
+        "hook_event_name": "SessionStart"
+    })
+    .to_string();
+    simulate_hook(&railguard_binary(), "SessionStart", &session_start);
+
+    let target = root.path().join("README.md");
+    let input = make_write_input(
+        "fence-anchor-drift",
+        nested.to_str().unwrap(),
+        target.to_str().unwrap(),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "write at repo root after cwd drift should be allowed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn fence_cd_back_to_repo_root_allowed() {
+    let root = create_policy_dir("version: 1\nblocklist: []\nfence:\n  enabled: true");
+    std::fs::create_dir_all(root.path().join(".git")).unwrap();
+    let nested = root.path().join("packages/app");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    // No SessionStart: the first PreToolUse anchors at the git root
+    let input = make_bash_input(
+        "fence-anchor-cd",
+        nested.to_str().unwrap(),
+        &format!("cd {} && pwd", root.path().display()),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "cd back to the repo root should be allowed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn fence_outside_anchor_still_asks() {
+    let root = create_policy_dir("version: 1\nblocklist: []\nfence:\n  enabled: true");
+    std::fs::create_dir_all(root.path().join(".git")).unwrap();
+    let other = tempfile::tempdir().unwrap();
+
+    let session_start = serde_json::json!({
+        "session_id": "fence-anchor-outside",
+        "cwd": root.path().to_str().unwrap(),
+        "hook_event_name": "SessionStart"
+    })
+    .to_string();
+    simulate_hook(&railguard_binary(), "SessionStart", &session_start);
+
+    let target = other.path().join("file.txt");
+    let input = make_write_input(
+        "fence-anchor-outside",
+        root.path().to_str().unwrap(),
+        target.to_str().unwrap(),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "write outside the anchored project should still ask: {}",
+        stdout
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // 4. SAFE COMMANDS PASS THROUGH
 // ═══════════════════════════════════════════════════════════════════

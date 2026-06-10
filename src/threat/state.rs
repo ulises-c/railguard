@@ -24,6 +24,12 @@ pub struct SessionState {
     /// If the next tool call arrives (meaning user approved), we move this to session_approvals.
     #[serde(default)]
     pub pending_approval: Option<String>,
+    /// Project root captured when the session was anchored (SessionStart, or
+    /// first PreToolUse for sessions without a SessionStart hook). The path
+    /// fence evaluates against this instead of the per-call cwd, which drifts
+    /// as the agent cd's around the repo.
+    #[serde(default)]
+    pub project_root: Option<String>,
     pub terminated: bool,
     pub termination_reason: Option<String>,
     pub termination_timestamp: Option<String>,
@@ -51,6 +57,7 @@ impl SessionState {
             heightened_keywords: Vec::new(),
             session_approvals: Vec::new(),
             pending_approval: None,
+            project_root: None,
             terminated: false,
             termination_reason: None,
             termination_timestamp: None,
@@ -59,6 +66,38 @@ impl SessionState {
 
     fn state_path(state_dir: &Path, session_id: &str) -> PathBuf {
         state_dir.join(format!("{}.json", session_id))
+    }
+
+    /// Find the project root for a session: the nearest ancestor of `cwd`
+    /// containing `.git` (a dir, or a file for worktrees/submodules), falling
+    /// back to `cwd` itself outside a git repo.
+    pub fn find_project_root(cwd: &Path) -> PathBuf {
+        let mut dir = cwd.to_path_buf();
+        loop {
+            if dir.join(".git").exists() {
+                return dir;
+            }
+            if !dir.pop() {
+                return cwd.to_path_buf();
+            }
+        }
+    }
+
+    /// Locate the state dir holding this session's state file by walking up
+    /// from `cwd`. The shell cwd persists across tool calls, so after a `cd`
+    /// into a subdirectory the state created at the project root would
+    /// otherwise not be found. Falls back to the project root for new sessions.
+    pub fn locate_state_dir(cwd: &Path, session_id: &str) -> PathBuf {
+        let mut dir = cwd.to_path_buf();
+        loop {
+            let candidate = dir.join(".railguard/state");
+            if Self::state_path(&candidate, session_id).exists() {
+                return candidate;
+            }
+            if !dir.pop() {
+                return Self::find_project_root(cwd).join(".railguard/state");
+            }
+        }
     }
 
     pub fn load(state_dir: &Path, session_id: &str) -> Self {
@@ -227,6 +266,50 @@ mod tests {
         // No longer heightened at call 14
         state.tool_call_count = 14;
         assert!(!state.is_in_heightened_state());
+    }
+
+    #[test]
+    fn test_find_project_root_walks_to_git() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        let nested = dir.path().join("packages/app");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(SessionState::find_project_root(&nested), dir.path());
+    }
+
+    #[test]
+    fn test_locate_state_dir_walks_up_from_nested_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("packages/app");
+        std::fs::create_dir_all(&nested).unwrap();
+        let state_dir = root.path().join(".railguard/state");
+        SessionState::new("walkup-test").save(&state_dir).unwrap();
+        assert_eq!(
+            SessionState::locate_state_dir(&nested, "walkup-test"),
+            state_dir
+        );
+    }
+
+    #[test]
+    fn test_locate_state_dir_new_session_uses_project_root() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".git")).unwrap();
+        let nested = root.path().join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            SessionState::locate_state_dir(&nested, "fresh-session"),
+            root.path().join(".railguard/state")
+        );
+    }
+
+    #[test]
+    fn test_project_root_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = SessionState::new("anchor-test");
+        state.project_root = Some("/repo".to_string());
+        state.save(dir.path()).unwrap();
+        let loaded = SessionState::load(dir.path(), "anchor-test");
+        assert_eq!(loaded.project_root.as_deref(), Some("/repo"));
     }
 
     #[test]

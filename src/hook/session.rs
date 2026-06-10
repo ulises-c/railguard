@@ -16,8 +16,15 @@ pub fn handle(input: &HookInput, policy: &Policy) -> HookOutput {
     // Check for updates (at most once per week)
     let update_message = update::check_for_update(cwd);
 
+    // Anchor the session: the path fence evaluates against this root for the
+    // whole session, immune to shell cwd drift from cd's into subdirectories.
+    let project_root = SessionState::find_project_root(cwd);
+    let state_dir = project_root.join(".railguard/state");
+    let mut state = SessionState::load(&state_dir, &input.session_id);
+    state.project_root = Some(project_root.display().to_string());
+    let _ = state.save(&state_dir);
+
     // Check for recently terminated sessions and warn
-    let state_dir = cwd.join(".railguard/state");
     let terminated = SessionState::find_recent_terminations(&state_dir);
     if !terminated.is_empty() {
         for state in &terminated {
