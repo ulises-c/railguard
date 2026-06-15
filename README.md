@@ -119,6 +119,12 @@ allowlist:
 
 ---
 
+## For your agent
+
+Drop [`templates/AGENTS.md`](templates/AGENTS.md) into your project to tell your coding agent how to work productively under Railguard — how to read allow/ask/block responses, why it must never retry a blocked command, how to stay on the right side of the path fence, and how to roll back. (`railguard install` also injects a short guardrails block into your `CLAUDE.md` automatically.)
+
+---
+
 ## Also included
 
 - **Path fencing** · ~/.ssh, ~/.aws, ~/.gnupg, /etc fenced by default
