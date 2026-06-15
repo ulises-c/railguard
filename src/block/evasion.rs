@@ -374,7 +374,7 @@ pub fn extract_paths_from_command(cmd: &str) -> Vec<String> {
     for caps in path_re.captures_iter(&expanded_cmd) {
         if let Some(path_match) = caps.get(1) {
             let p = path_match.as_str().to_string();
-            if !is_benign_path(&p) {
+            if has_path_component(&p) && !is_benign_path(&p) {
                 paths.push(p);
             }
         }
@@ -384,13 +384,22 @@ pub fn extract_paths_from_command(cmd: &str) -> Vec<String> {
     for caps in path_re.captures_iter(cmd) {
         if let Some(path_match) = caps.get(1) {
             let p = path_match.as_str().to_string();
-            if !is_benign_path(&p) && !paths.contains(&p) {
+            if has_path_component(&p) && !is_benign_path(&p) && !paths.contains(&p) {
                 paths.push(p);
             }
         }
     }
 
     paths
+}
+
+/// Whether a captured token actually names a file, rather than being a run of
+/// path punctuation. The path regex can capture slash sequences with no real
+/// component — e.g. `//` from jq's alternative operator (`a // b`) — which then
+/// trip the fence as a bogus "outside project" path. Real targets (`/etc`,
+/// `~/.ssh`, `../foo`) always carry at least one alphanumeric character.
+fn has_path_component(path: &str) -> bool {
+    path.chars().any(|c| c.is_alphanumeric())
 }
 
 /// Paths that should never trigger fence violations.
@@ -599,5 +608,35 @@ mod tests {
             "single variable should expand: {:?}",
             variants
         );
+    }
+
+    #[test]
+    fn test_jq_alternative_operator_not_a_path() {
+        // jq's `a // b` operator must not be captured as the path `//`.
+        let cmd = r#"jq '{m: (.permissions.defaultMode // null)}' settings.json"#;
+        let paths = extract_paths_from_command(cmd);
+        assert!(
+            !paths.iter().any(|p| p == "//"),
+            "jq // operator should not be extracted as a path: {:?}",
+            paths
+        );
+    }
+
+    #[test]
+    fn test_bare_double_slash_not_a_path() {
+        let paths = extract_paths_from_command(r#"echo "//" "#);
+        assert!(
+            !paths.contains(&"//".to_string()),
+            "bare // should not be extracted as a path: {:?}",
+            paths
+        );
+    }
+
+    #[test]
+    fn test_real_paths_still_extracted() {
+        // The has_path_component filter must not drop genuine targets.
+        assert!(extract_paths_from_command("cat /etc/passwd").contains(&"/etc/passwd".to_string()));
+        assert!(extract_paths_from_command("vim ~/.ssh/id_ed25519")
+            .contains(&"~/.ssh/id_ed25519".to_string()));
     }
 }
