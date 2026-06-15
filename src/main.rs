@@ -609,8 +609,6 @@ snapshot:
 Read the current railguard.yaml (if it exists) and help the user modify it based on their needs. Always write valid YAML with valid regex patterns."#;
 
             let status = std::process::Command::new("claude")
-                .arg("--print")
-                .arg("-p")
                 .arg(prompt)
                 .status();
 
