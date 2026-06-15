@@ -517,14 +517,25 @@ fn is_read_only_tool(tool_name: &str) -> bool {
     matches!(tool_name, "Read" | "Glob" | "Grep")
 }
 
-/// Returns true if a bash command is read-only (doesn't modify files).
+/// Returns true if a bash command is read-only (cannot create or modify files).
+///
+/// Used only to waive the path-fence *prompt*: a command that can't write
+/// outside the project shouldn't trigger an "approve?" on path-shaped text it
+/// merely contains (sed/awk regex addresses, jq's `//` operator, URLs).
+/// Reducing those false prompts is the point — prompt fatigue trains the human
+/// to rubber-stamp everything.
+///
+/// The check is conservative and inspects *every* segment of a compound
+/// command. Looking at only the first token let `cd repo && sed -n '/fn/p' f`
+/// slip through as non-read-only and get fenced on the `/fn` regex address.
+/// Denied-path access is evaluated separately and is NOT waived here, so a
+/// read of `~/.ssh` stays blocked regardless of this result.
 fn is_read_only_command(cmd: &str) -> bool {
-    let trimmed = cmd.trim_start();
-    // Get the first command token (before pipes, semicolons, &&, ||)
-    let first_token = trimmed
-        .split(|c: char| c.is_whitespace() || c == '|' || c == ';' || c == '&')
-        .next()
-        .unwrap_or("");
+    // An output redirect writes a file — never read-only. Checked up front so a
+    // navigation prefix can't launder it, e.g. `cd /tmp && echo x > ~/outside`.
+    if cmd.contains('>') {
+        return false;
+    }
 
     const READ_ONLY_COMMANDS: &[&str] = &[
         "find", "ls", "cat", "head", "tail", "less", "more", "wc",
@@ -539,7 +550,17 @@ fn is_read_only_command(cmd: &str) -> bool {
         "node", "python", "python3", "ruby", "go", "rustc",
     ];
 
-    READ_ONLY_COMMANDS.contains(&first_token)
+    // Every segment of a compound command (`&&`, `||`, `;`, `|`) must itself be
+    // read-only. `cd`/`pushd`/`popd` are navigation and don't disqualify.
+    // (Split is connector-naive; a connector char inside a quoted program at
+    // worst yields a non-read-only verdict — more fencing, never less.)
+    cmd.split(|c: char| c == ';' || c == '|' || c == '&')
+        .map(str::trim)
+        .filter(|seg| !seg.is_empty())
+        .all(|seg| {
+            let tok = seg.split(char::is_whitespace).next().unwrap_or("");
+            matches!(tok, "cd" | "pushd" | "popd") || READ_ONLY_COMMANDS.contains(&tok)
+        })
 }
 
 fn summarize_input(tool_name: &str, tool_input: &serde_json::Value) -> String {
