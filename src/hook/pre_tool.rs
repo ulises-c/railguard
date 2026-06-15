@@ -545,17 +545,26 @@ fn is_read_only_command(cmd: &str) -> bool {
         return false;
     }
 
+    // Only tools that inspect/read. A tool earns a spot here only if it cannot
+    // create or modify a file without a shell redirect — and redirects are
+    // already rejected by the `>` check above. Deliberately EXCLUDED, even
+    // though they are common in read-only invocations: interpreters (`python`,
+    // `node`, `ruby`), `go`/`rustc`, version control (`git`), and package
+    // managers (`cargo`, `npm`, `npx`, `yarn`, `pnpm`, `bun`), and `xargs`
+    // (it runs an arbitrary downstream command, e.g. `xargs rm`). Writing is a
+    // normal mode of operation for all of these and their read-vs-write intent
+    // cannot be told from the leading token (`git log` vs `git checkout`,
+    // `python -c "print(1)"` vs `python -c "open(p,'w')"`), so they must keep
+    // prompting when they name a path outside the project. Do not re-add them.
     const READ_ONLY_COMMANDS: &[&str] = &[
         "find", "ls", "cat", "head", "tail", "less", "more", "wc",
         "file", "stat", "du", "df", "which", "whereis", "type",
         "grep", "rg", "ag", "ack", "fd", "tree", "realpath",
         "readlink", "basename", "dirname", "diff", "md5", "shasum",
         "sha256sum", "md5sum", "xxd", "hexdump", "strings",
-        "jq", "yq", "xargs", "sort", "uniq", "tr", "cut", "awk",
+        "jq", "yq", "sort", "uniq", "tr", "cut", "awk",
         "sed", "pwd", "env", "printenv", "uname", "whoami", "id",
         "date", "cal", "echo", "printf", "test", "[",
-        "git", "cargo", "npm", "npx", "yarn", "pnpm", "bun",
-        "node", "python", "python3", "ruby", "go", "rustc",
     ];
 
     // Every segment of a compound command (`&&`, `||`, `;`, `|`) must itself be
