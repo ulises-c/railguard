@@ -195,6 +195,7 @@ mod tests {
                 "~/.aws".to_string(),
                 "/etc".to_string(),
             ],
+            allow_local_overrides: false,
         }
     }
 
@@ -224,6 +225,7 @@ mod tests {
             enabled: false,
             allowed_paths: vec![],
             denied_paths: vec!["/etc".to_string()],
+            allow_local_overrides: false,
         };
         assert_eq!(check_path(&config, "/etc/passwd", "/project"), PathCheck::Allow);
     }
@@ -234,6 +236,7 @@ mod tests {
             enabled: true,
             allowed_paths: vec![],
             denied_paths: vec![],
+            allow_local_overrides: false,
         };
         assert!(matches!(check_path(&config, "/other/file.txt", "/project"), PathCheck::OutsideProject(_)));
     }
@@ -244,6 +247,7 @@ mod tests {
             enabled: true,
             allowed_paths: vec!["/project".to_string(), "/tmp".to_string()],
             denied_paths: vec![],
+            allow_local_overrides: false,
         };
         assert_eq!(check_path(&config, "/project/src/main.rs", "/project"), PathCheck::Allow);
         assert_eq!(check_path(&config, "/tmp/test.txt", "/project"), PathCheck::Allow);
@@ -257,6 +261,7 @@ mod tests {
             enabled: true,
             allowed_paths: vec!["/tmp".to_string()],
             denied_paths: vec![],
+            allow_local_overrides: false,
         };
         assert_eq!(check_path(&config, "/project/src/main.rs", "/project"), PathCheck::Allow);
         assert_eq!(check_path(&config, "/tmp/test.txt", "/project"), PathCheck::Allow);

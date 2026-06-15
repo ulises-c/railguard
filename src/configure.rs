@@ -449,6 +449,11 @@ fn generate_yaml(policy: &Policy) -> String {
     yaml.push_str(&format!("  enabled: {}\n", policy.fence.enabled));
     if policy.fence.enabled {
         yaml.push_str("  allowed_paths: []\n");
+        yaml.push_str("  # Let a project-local .railguard.local.yaml add to allowed_paths.\n");
+        yaml.push_str(&format!(
+            "  allow_local_overrides: {}\n",
+            policy.fence.allow_local_overrides
+        ));
         yaml.push_str("  denied_paths:\n");
         for path in &policy.fence.denied_paths {
             yaml.push_str(&format!("    - \"{}\"\n", path));
