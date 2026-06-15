@@ -660,6 +660,26 @@ Users can disable individual rules or categories in `railguard.yaml`. If protect
 
 Users who disable protections accept these tradeoffs. The default configuration includes all ~30 rules and all four detection layers.
 
+### Path Fence Read-Only Waiver Is Conservative By Design
+
+To avoid prompt fatigue, the path fence waives its "approve?" prompt for commands it classifies as read-only (it inspects the leading token of every `&&`/`||`/`;`/`|` segment). That classification is intentionally one-sided:
+
+- **It never waives a write.** Any output redirect (`>`, `>>`) disqualifies a command outright, and only tools that purely read (`cat`, `grep`, `sed`, `awk`, `jq`, `find`, ...) are eligible. Interpreters (`python`, `node`, `ruby`), compilers (`go`, `rustc`), version control (`git`), package managers (`cargo`, `npm`, `yarn`, ...), and `xargs` are deliberately *not* eligible — they write as a normal mode of operation and their intent cannot be read from the leading token, so they keep prompting whenever they name a path outside the project.
+- **The redirect check is a substring match (`>`), so it errs toward prompting.** A genuinely read-only command that merely contains `>` in a quoted argument or regex (e.g. `grep 'a -> b' notes.txt`) is treated as non-read-only. If such a command also names an outside path, it produces an approval prompt. This is a false positive in the *safe* direction — more prompting, never less — and is accepted in exchange for guaranteeing a redirect can never be laundered past the fence by a leading `cd`.
+
+The waiver applies only to the `OutsideProject` approval prompt. Denied-path access (`~/.ssh`, `/etc`, ...) is evaluated first and is **never** waived, regardless of how read-only a command looks.
+
+### Local Override File Resolution Walks Up To The Filesystem Root
+
+When a base policy opts in with `fence.allow_local_overrides: true`, Railguard resolves the additive `.railguard.local.yaml` by walking up from the working directory — the same strategy `find_policy_file` uses for the full policy. A consequence: an override file placed in a *parent* directory (e.g. the user's home directory) is found for every project beneath it, widening `allowed_paths` more broadly than "one project."
+
+This is a deliberate trust decision, bounded by two controls that still hold:
+
+- **Opt-in lives in the human-controlled base policy.** A cloned or hostile repo cannot self-grant access by shipping a `.railguard.local.yaml`; the global policy must enable `allow_local_overrides` first.
+- **Denies still win.** The override can only *add* `allowed_paths`; `check_path` evaluates `denied_paths` first, so an override can never expose `~/.ssh`, `/etc`, or any other denied location no matter where it sits in the directory tree.
+
+Users who want an exception scoped to exactly one project should place `.railguard.local.yaml` in that project's root, not in a shared ancestor.
+
 ### Trust in Claude Code Hook System
 
 Railguard relies on Claude Code's hook system to intercept tool calls. If Claude Code has a vulnerability that allows the agent to bypass hooks entirely, Railguard provides no protection. This is an explicit dependency and trust assumption.

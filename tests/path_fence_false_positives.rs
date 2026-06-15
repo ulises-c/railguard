@@ -121,3 +121,42 @@ fn benign_commands_are_not_path_fenced() {
         failures.join("\n")
     );
 }
+
+/// The flip side of prompt fatigue: write-capable tools that name a path OUTSIDE
+/// the project must still be fenced. `is_read_only_command` waives the prompt
+/// only for tools that purely read; interpreters, compilers, VCS, package
+/// managers, and `xargs` write as a normal mode of operation and cannot be
+/// judged read-only from their leading token, so a leading `cd` into an outside
+/// directory must not launder them past the fence. None of these reference a
+/// denied path — they reference `~/...` outside the temp project, so the
+/// expected decision is the OutsideProject approval prompt.
+const WRITE_CAPABLE_OUTSIDE: &[(&str, &str)] = &[
+    ("git -C outside", r#"git -C ~/other-repo log --oneline"#),
+    ("cd outside then python", r#"cd ~/scratch && python build.py"#),
+    ("node outside script", r#"node ~/outside/app.js"#),
+    ("cargo manifest outside", r#"cargo build --manifest-path ~/other/Cargo.toml"#),
+    ("npm prefix outside", r#"npm install --prefix ~/other/pkg"#),
+    ("ruby outside script", r#"ruby ~/scratch/gen.rb"#),
+];
+
+#[test]
+fn write_capable_commands_outside_project_are_fenced() {
+    let dir = create_policy_dir("version: 1\nblocklist: []\n");
+    let cwd = dir.path().to_str().unwrap();
+    let binary = railguard_binary();
+
+    let mut leaks = Vec::new();
+    for (label, cmd) in WRITE_CAPABLE_OUTSIDE {
+        let stdout = simulate_hook(&binary, &bash_input(cwd, cmd));
+        if !path_fenced(&stdout) {
+            leaks.push(format!("  [{label}] `{cmd}`"));
+        }
+    }
+
+    assert!(
+        leaks.is_empty(),
+        "{} write-capable command(s) reached an outside path without a fence prompt:\n{}",
+        leaks.len(),
+        leaks.join("\n")
+    );
+}
