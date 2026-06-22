@@ -3,8 +3,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, Duration};
 
-const REMOTE_URL: &str = "https://github.com/railyard-dev/railguard.git";
-const GITHUB_REPO: &str = "railyard-dev/railguard";
+const REMOTE_URL: &str = "https://github.com/ulises-c/railguard.git";
+const GITHUB_REPO: &str = "ulises-c/railguard";
 const CHECK_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60); // 1 week
 const BUILD_HASH: &str = env!("RAILGUARD_GIT_HASH");
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
