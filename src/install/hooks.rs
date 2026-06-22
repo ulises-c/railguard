@@ -175,6 +175,57 @@ pub fn install_hooks() -> Result<String, String> {
     ))
 }
 
+/// Insert or replace the railguard section in CLAUDE.md `existing` content,
+/// returning the full new file contents (with trailing newline). User content
+/// before/after the markers is preserved and separated from the section by a
+/// blank line, so the start marker never fuses onto a user's line.
+fn upsert_railguard_section(existing: &str, marked_content: &str) -> String {
+    if existing.contains(CLAUDE_MD_MARKER_START) {
+        let before = existing
+            .split(CLAUDE_MD_MARKER_START)
+            .next()
+            .unwrap_or("")
+            .trim_end();
+        let after = existing
+            .split(CLAUDE_MD_MARKER_END)
+            .nth(1)
+            .unwrap_or("");
+        let separator = if before.is_empty() { "" } else { "\n\n" };
+        let updated = format!("{}{}{}{}", before, separator, marked_content, after);
+        return updated.trim().to_string() + "\n";
+    }
+    let before = existing.trim_end();
+    if before.is_empty() {
+        format!("{}\n", marked_content)
+    } else {
+        format!("{}\n\n{}\n", before, marked_content)
+    }
+}
+
+/// Strip the railguard section from CLAUDE.md `content`, rejoining surrounding
+/// user content with a blank line. Returns `None` if no section marker present.
+fn strip_railguard_section(content: &str) -> Option<String> {
+    if !content.contains(CLAUDE_MD_MARKER_START) {
+        return None;
+    }
+    let before = content
+        .split(CLAUDE_MD_MARKER_START)
+        .next()
+        .unwrap_or("")
+        .trim_end();
+    let after = content
+        .split(CLAUDE_MD_MARKER_END)
+        .nth(1)
+        .unwrap_or("")
+        .trim_start();
+    let cleaned = if before.is_empty() || after.is_empty() {
+        format!("{}{}", before, after)
+    } else {
+        format!("{}\n\n{}", before, after)
+    };
+    Some(cleaned.trim().to_string() + "\n")
+}
+
 /// Inject Railguard instructions into the user's CLAUDE.md file.
 /// This teaches Claude Code about rollback, context, and what's blocked.
 fn inject_claude_md() -> Result<String, String> {
@@ -189,31 +240,16 @@ fn inject_claude_md() -> Result<String, String> {
     if claude_md_path.exists() {
         let existing = fs::read_to_string(&claude_md_path)
             .map_err(|e| format!("Failed to read CLAUDE.md: {}", e))?;
-
-        if existing.contains(CLAUDE_MD_MARKER_START) {
-            // Replace existing railguard section
-            let before = existing
-                .split(CLAUDE_MD_MARKER_START)
-                .next()
-                .unwrap_or("");
-            let after = existing
-                .split(CLAUDE_MD_MARKER_END)
-                .nth(1)
-                .unwrap_or("");
-
-            let updated = format!("{}{}{}", before.trim_end(), marked_content, after);
-            fs::write(&claude_md_path, updated.trim().to_string() + "\n")
-                .map_err(|e| format!("Failed to update CLAUDE.md: {}", e))?;
-
-            return Ok("Updated Railguard instructions in ~/.claude/CLAUDE.md".to_string());
-        }
-
-        // Append to existing file
-        let updated = format!("{}\n\n{}\n", existing.trim_end(), marked_content);
+        let had_section = existing.contains(CLAUDE_MD_MARKER_START);
+        let updated = upsert_railguard_section(&existing, &marked_content);
         fs::write(&claude_md_path, updated)
             .map_err(|e| format!("Failed to update CLAUDE.md: {}", e))?;
 
-        Ok("Added Railguard instructions to ~/.claude/CLAUDE.md".to_string())
+        Ok(if had_section {
+            "Updated Railguard instructions in ~/.claude/CLAUDE.md".to_string()
+        } else {
+            "Added Railguard instructions to ~/.claude/CLAUDE.md".to_string()
+        })
     } else {
         // Create new file
         if let Some(parent) = claude_md_path.parent() {
@@ -306,18 +342,8 @@ fn remove_claude_md_section() {
     }
 
     if let Ok(content) = fs::read_to_string(&claude_md_path) {
-        if content.contains(CLAUDE_MD_MARKER_START) {
-            let before = content
-                .split(CLAUDE_MD_MARKER_START)
-                .next()
-                .unwrap_or("");
-            let after = content
-                .split(CLAUDE_MD_MARKER_END)
-                .nth(1)
-                .unwrap_or("");
-
-            let cleaned = format!("{}{}", before.trim_end(), after.trim_start());
-            let _ = fs::write(&claude_md_path, cleaned.trim().to_string() + "\n");
+        if let Some(cleaned) = strip_railguard_section(&content) {
+            let _ = fs::write(&claude_md_path, cleaned);
         }
     }
 }
@@ -503,5 +529,69 @@ mod tests {
         let path = claude_settings_path();
         assert!(path.to_str().unwrap().contains(".claude"));
         assert!(path.to_str().unwrap().ends_with("settings.json"));
+    }
+
+    fn marked() -> String {
+        format!(
+            "{}\n{}\n{}",
+            CLAUDE_MD_MARKER_START, "RAILGUARD BODY", CLAUDE_MD_MARKER_END
+        )
+    }
+
+    #[test]
+    fn upsert_replace_keeps_blank_line_before_marker() {
+        // Regression: reinstall must not fuse the user's last line onto the start marker.
+        let existing = format!(
+            "# Notes\nlast line\n\n{}\nOLD BODY\n{}\n",
+            CLAUDE_MD_MARKER_START, CLAUDE_MD_MARKER_END
+        );
+        let out = upsert_railguard_section(&existing, &marked());
+        assert!(
+            out.contains(&format!("last line\n\n{}", CLAUDE_MD_MARKER_START)),
+            "expected blank line before marker, got:\n{out}"
+        );
+        assert!(!out.contains(&format!("last line{}", CLAUDE_MD_MARKER_START)));
+        assert!(out.contains("RAILGUARD BODY") && !out.contains("OLD BODY"));
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn upsert_replace_is_idempotent() {
+        let existing = format!(
+            "# Notes\nlast line\n\n{}\nOLD\n{}\n",
+            CLAUDE_MD_MARKER_START, CLAUDE_MD_MARKER_END
+        );
+        let once = upsert_railguard_section(&existing, &marked());
+        let twice = upsert_railguard_section(&once, &marked());
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn upsert_appends_with_blank_line_when_no_marker() {
+        let out = upsert_railguard_section("# Notes\nblah", &marked());
+        assert!(out.contains(&format!("blah\n\n{}", CLAUDE_MD_MARKER_START)));
+    }
+
+    #[test]
+    fn upsert_on_empty_has_no_leading_blank() {
+        let out = upsert_railguard_section("", &marked());
+        assert!(out.starts_with(CLAUDE_MD_MARKER_START));
+    }
+
+    #[test]
+    fn strip_rejoins_surrounding_content_without_fusing() {
+        let existing = format!(
+            "# Top\nA\n\n{}\nBODY\n{}\n\n# Bottom\nB\n",
+            CLAUDE_MD_MARKER_START, CLAUDE_MD_MARKER_END
+        );
+        let out = strip_railguard_section(&existing).unwrap();
+        assert!(!out.contains(CLAUDE_MD_MARKER_START) && !out.contains(CLAUDE_MD_MARKER_END));
+        assert!(out.contains("A\n\n# Bottom"), "got:\n{out}");
+        assert!(!out.contains("AB") && !out.contains("A# Bottom"));
+    }
+
+    #[test]
+    fn strip_returns_none_without_marker() {
+        assert!(strip_railguard_section("# Just user notes\n").is_none());
     }
 }
