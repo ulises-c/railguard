@@ -4,7 +4,7 @@
 **Date:** 2026-03-09
 **Applies to:** Railguard v0.1.0
 **Classification:** Public
-**Repository:** https://github.com/railguard-dev/railguard
+**Repository:** https://github.com/railyard-dev/railguard
 
 This document describes the threat model, security architecture, formal guarantees, known limitations, and compliance posture of Railguard. It is intended for security researchers, CISOs, compliance teams, and anyone conducting a risk assessment of AI agent tooling.
 
