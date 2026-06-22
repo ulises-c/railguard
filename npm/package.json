@@ -22,9 +22,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/railguard-dev/railguard"
+    "url": "https://github.com/railyard-dev/railguard"
   },
-  "homepage": "https://github.com/railguard-dev/railguard",
+  "homepage": "https://github.com/railyard-dev/railguard",
   "os": [
     "darwin",
     "linux"
