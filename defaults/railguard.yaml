@@ -68,6 +68,9 @@ allowlist: []
 fence:
   enabled: true
   allowed_paths: []        # Empty = allow project directory only
+  # allow_local_overrides: true   # Let a project-local .railguard.local.yaml
+                                   # add to allowed_paths (additive only; denies
+                                   # still win). See docs/per-project-allowlist.md
   denied_paths:
     - "~/.ssh"
     - "~/.aws"

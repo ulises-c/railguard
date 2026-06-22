@@ -9,6 +9,10 @@ Railguard is monitoring this session. Every tool call (Bash, Write, Edit, Read) 
 - **File writes are snapshotted.** Every Write/Edit you make is backed up before execution. The human can rollback any change.
 - **Everything is logged.** All tool calls and decisions are recorded in `.railguard/traces/`.
 
+## Writing files
+
+Prefer `Write`/`Edit` over Bash redirects (`cat <<EOF >`, `echo >`, `printf >`). Tool writes are snapshotted and skip the Bash path-fence scan, which matches fenced-path *strings* in command text — so a command merely mentioning a fenced path (heredoc, issue body) is blocked even if it never touches it. Switching a fence-blocked heredoc to `Write` is intended remediation, not evasion.
+
 ## If something goes wrong
 
 If the human asks you to undo changes, fix a mistake, or rollback:
@@ -38,6 +42,13 @@ You **can** help the user customize their Railguard policy. This is encouraged:
 - **Run `railguard init`** to generate a starter `railguard.yaml` if one doesn't exist (user approves).
 - **Run `railguard status`** to show the current protection state.
 All changes to Railguard policy require explicit human approval. You generate the change, the user reviews and accepts or rejects it. Changes take effect on the next tool call — no restart needed.
+
+### Policy layers
+
+- **Global** `railguard.yaml` / `~/.railguard.yaml` (resolved upward from cwd) — base rules; edits gated to **ask**.
+- **Per-project** `.railguard.local.yaml` (project root) — additive `fence.allowed_paths` only; cannot weaken `denied_paths` or disable the fence. Honored only if global sets `fence.allow_local_overrides: true`; the project cannot opt itself in.
+
+Out-of-project path keeps prompting and the human wants it for this project only → add it to `.railguard.local.yaml`, not the global policy. Override ignored = global `allow_local_overrides: true` missing. Gitignore it unless the exception is shared. Details: `docs/per-project-allowlist.md`.
 
 ## Do NOT attempt to
 
