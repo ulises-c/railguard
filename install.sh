@@ -1,9 +1,9 @@
 #!/bin/sh
 # install.sh — Installer for railguard
-# Usage: curl -fsSL https://raw.githubusercontent.com/railguard-dev/railguard/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/railyard-dev/railguard/main/install.sh | sh
 set -e
 
-REPO="railguard-dev/railguard"
+REPO="railyard-dev/railguard"
 BINARY="railguard"
 
 # Directory containing this script (the local checkout root)

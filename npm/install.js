@@ -7,7 +7,7 @@ const os = require("os");
 const https = require("https");
 
 const VERSION = "0.1.0";
-const REPO = "railguard-dev/railguard";
+const REPO = "railyard-dev/railguard";
 const BIN_DIR = path.join(__dirname, "bin");
 const BIN_PATH = path.join(BIN_DIR, "railguard");
 
@@ -27,7 +27,7 @@ function getPlatform() {
 function tryCargoInstall() {
   console.log("  Building from source with cargo...");
   try {
-    execSync("cargo install --git https://github.com/railguard-dev/railguard.git", {
+    execSync("cargo install --git https://github.com/railyard-dev/railguard.git", {
       stdio: "inherit",
     });
 
@@ -120,7 +120,7 @@ async function main() {
   console.error("  Failed to install railguard.");
   console.error();
   console.error("  To install manually:");
-  console.error("    cargo install --git https://github.com/railguard-dev/railguard.git");
+  console.error("    cargo install --git https://github.com/railyard-dev/railguard.git");
   console.error();
   process.exit(1);
 }
