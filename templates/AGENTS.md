@@ -28,3 +28,9 @@ The Bash fence matches fenced path **strings** in the command, so a command that
 ## Self-protection
 
 Hard-blocked, and attempting them counts against you: `railguard uninstall`, editing `.claude/settings.json`, removing the railguard binary. Editing `railguard.yaml` is gated to **ask** — you *can* help tune policy: read it, propose an edit (the human approves), or run `railguard configure`. Changes take effect immediately, no restart needed.
+
+## Widening file access for one project
+
+Two policy layers: **global** `railguard.yaml` (resolved upward from cwd) and optional **per-project** `.railguard.local.yaml` (project root). The override is additive `fence.allowed_paths` only — cannot weaken `denied_paths` or disable the fence — and is honored only if the global policy sets `fence.allow_local_overrides: true`; the project cannot opt itself in.
+
+Out-of-project path keeps prompting (`ask`) and the human wants it for this project only → add it to `.railguard.local.yaml`, not the global policy. Override looks ignored = global `allow_local_overrides: true` missing; tell the human to set it. Gitignore the file unless the exception is shared. Full reasoning: [`docs/per-project-allowlist.md`](../docs/per-project-allowlist.md).
