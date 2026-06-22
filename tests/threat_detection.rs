@@ -9,6 +9,7 @@
 
 use std::io::Write;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
 fn railguard_binary() -> String {
@@ -17,8 +18,25 @@ fn railguard_binary() -> String {
     path.to_str().unwrap().to_string()
 }
 
+static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A session id unique across tests, parallelism, and `cargo test` runs.
+/// Threat state is keyed per session at `.railguard/state/{id}.json`; reusing
+/// a literal id let suspicion/approvals bleed between tests and persist on disk.
+fn unique_session_id() -> String {
+    format!(
+        "test-{}-{}",
+        std::process::id(),
+        SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 fn create_test_dir() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
+    // Anchor the project root at the tempdir so threat state lands inside it
+    // (and is dropped with the tempdir) instead of escaping up to a shared
+    // ancestor — e.g. a stray `.git` above the system temp dir.
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
     let yaml = "version: 1\nblocklist: []\ntrace:\n  enabled: true\n  directory: .railguard/traces";
     let policy_path = dir.path().join("railguard.yaml");
     std::fs::write(&policy_path, yaml).unwrap();
@@ -81,15 +99,16 @@ fn output_is_not_allowed(stdout: &str) -> bool {
 fn tier1_rev_pipe_sh_asks_user() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
 
-    let input = make_bash_input("tier1-rev", cwd, "rev <<< 'yortsed mrofarret' | sh");
+    let input = make_bash_input(&sid, cwd, "rev <<< 'yortsed mrofarret' | sh");
     let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
 
     assert!(output_contains_ask(&stdout), "should ask user for approval: {}", stdout);
     assert!(stdout.contains("RAILGUARD"), "should mention RAILGUARD: {}", stdout);
 
     // State file should have a pending approval
-    let state_path = dir.path().join(".railguard/state/tier1-rev.json");
+    let state_path = dir.path().join(format!(".railguard/state/{}.json", sid));
     assert!(state_path.exists(), "state file should be created");
     let state: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&state_path).unwrap()
@@ -104,7 +123,7 @@ fn tier1_double_base64_asks_user() {
     let cwd = dir.path().to_str().unwrap();
 
     let input = make_bash_input(
-        "tier1-b64",
+        &unique_session_id(),
         cwd,
         "echo abc123 | base64 -d | base64 -d | sh",
     );
@@ -118,7 +137,7 @@ fn tier1_python_chr_asks_user() {
     let cwd = dir.path().to_str().unwrap();
 
     let input = make_bash_input(
-        "tier1-chr",
+        &unique_session_id(),
         cwd,
         r#"python3 -c "import os; os.system(chr(114)+chr(109))""#,
     );
@@ -132,7 +151,7 @@ fn tier1_printf_hex_asks_user() {
     let cwd = dir.path().to_str().unwrap();
 
     let input = make_bash_input(
-        "tier1-hex",
+        &unique_session_id(),
         cwd,
         r"$(printf '\x72\x6d') -rf /tmp/something",
     );
@@ -148,16 +167,17 @@ fn tier1_printf_hex_asks_user() {
 fn tier1_approval_allows_subsequent_same_pattern() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
 
     // First call: should ask
-    let input1 = make_bash_input("tier1-approve", cwd, "rev <<< 'test' | sh");
+    let input1 = make_bash_input(&sid, cwd, "rev <<< 'test' | sh");
     let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
     assert!(output_contains_ask(&stdout1), "first should ask: {}", stdout1);
 
     // Simulate user approval by making a subsequent call
     // (resolve_pending_approval runs at start of next call)
     // The next call with a similar Tier 1 pattern should be allowed
-    let input2 = make_bash_input("tier1-approve", cwd, "rev <<< 'another' | sh");
+    let input2 = make_bash_input(&sid, cwd, "rev <<< 'another' | sh");
     let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
     assert!(!output_contains_deny(&stdout2), "second should be allowed after approval: {}", stdout2);
     assert!(!output_contains_ask(&stdout2), "should not ask again: {}", stdout2);
@@ -173,7 +193,7 @@ fn tier2_first_occurrence_warns() {
     let cwd = dir.path().to_str().unwrap();
 
     // First: variable-then-execution — should warn but NOT ask/terminate
-    let input = make_bash_input("tier2-warn", cwd, r#"CMD="ls -la"; $CMD"#);
+    let input = make_bash_input(&unique_session_id(), cwd, r#"CMD="ls -la"; $CMD"#);
     let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
 
     assert!(
@@ -193,8 +213,10 @@ fn tier2_second_occurrence_asks_user() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
 
+    let sid = unique_session_id();
+
     // First occurrence — warning
-    let input1 = make_bash_input("tier2-ask", cwd, r#"CMD="ls -la"; $CMD"#);
+    let input1 = make_bash_input(&sid, cwd, r#"CMD="ls -la"; $CMD"#);
     let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
     assert!(
         !output_contains_ask(&stdout1),
@@ -202,7 +224,7 @@ fn tier2_second_occurrence_asks_user() {
     );
 
     // Second occurrence — should ask user
-    let input2 = make_bash_input("tier2-ask", cwd, r#"X="echo hello"; $X"#);
+    let input2 = make_bash_input(&sid, cwd, r#"X="echo hello"; $X"#);
     let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
     assert!(
         output_contains_ask(&stdout2),
@@ -220,13 +242,15 @@ fn tier3_retry_after_block_asks_user() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
 
+    let sid = unique_session_id();
+
     // Step 1: Run terraform destroy — gets blocked by policy
-    let input1 = make_bash_input("tier3-retry", cwd, "terraform destroy");
+    let input1 = make_bash_input(&sid, cwd, "terraform destroy");
     let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
     assert!(output_contains_deny(&stdout1), "terraform destroy should be blocked");
 
     // Step 2: Try again with same keywords — behavioral evasion detected, asks user
-    let input2 = make_bash_input("tier3-retry", cwd, "terraform apply -destroy");
+    let input2 = make_bash_input(&sid, cwd, "terraform apply -destroy");
     let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
     assert!(output_is_not_allowed(&stdout2), "retry should be caught: {}", stdout2);
 }
@@ -239,13 +263,14 @@ fn tier3_retry_after_block_asks_user() {
 fn state_persists_across_invocations() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
 
     // First call
-    let input1 = make_bash_input("persist-test", cwd, "echo hello");
+    let input1 = make_bash_input(&sid, cwd, "echo hello");
     simulate_hook(&railguard_binary(), "PreToolUse", &input1);
 
     // State file should exist
-    let state_path = dir.path().join(".railguard/state/persist-test.json");
+    let state_path = dir.path().join(format!(".railguard/state/{}.json", sid));
     assert!(state_path.exists(), "state file should be created");
 
     let state1: serde_json::Value =
@@ -253,7 +278,7 @@ fn state_persists_across_invocations() {
     assert_eq!(state1["tool_call_count"], 1);
 
     // Second call
-    let input2 = make_bash_input("persist-test", cwd, "echo world");
+    let input2 = make_bash_input(&sid, cwd, "echo world");
     simulate_hook(&railguard_binary(), "PreToolUse", &input2);
 
     let state2: serde_json::Value =
@@ -265,20 +290,21 @@ fn state_persists_across_invocations() {
 fn session_approvals_persist_in_state() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
 
     // Trigger a Tier 1 ask
-    let input1 = make_bash_input("approval-persist", cwd, "rev <<< 'test' | sh");
+    let input1 = make_bash_input(&sid, cwd, "rev <<< 'test' | sh");
     let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
     assert!(output_contains_ask(&stdout1));
 
     // State should have pending_approval
-    let state_path = dir.path().join(".railguard/state/approval-persist.json");
+    let state_path = dir.path().join(format!(".railguard/state/{}.json", sid));
     let state1: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
     assert!(state1["pending_approval"].is_string());
 
     // Next call resolves the pending approval
-    let input2 = make_bash_input("approval-persist", cwd, "echo safe");
+    let input2 = make_bash_input(&sid, cwd, "echo safe");
     simulate_hook(&railguard_binary(), "PreToolUse", &input2);
 
     let state2: serde_json::Value =
@@ -298,12 +324,13 @@ fn session_approvals_persist_in_state() {
 fn terminated_session_asks_to_resume() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
 
     // Manually create a terminated session state
     let state_dir = dir.path().join(".railguard/state");
     std::fs::create_dir_all(&state_dir).unwrap();
     let state_json = serde_json::json!({
-        "session_id": "resume-test",
+        "session_id": &sid,
         "tool_call_count": 10,
         "suspicion_level": 2,
         "warning_count": 1,
@@ -317,12 +344,12 @@ fn terminated_session_asks_to_resume() {
         "termination_timestamp": "2026-03-22T00:00:00Z"
     });
     std::fs::write(
-        state_dir.join("resume-test.json"),
+        state_dir.join(format!("{}.json", sid)),
         serde_json::to_string_pretty(&state_json).unwrap(),
     ).unwrap();
 
     // First tool call on terminated session should ASK (not deny)
-    let input = make_bash_input("resume-test", cwd, "echo hello");
+    let input = make_bash_input(&sid, cwd, "echo hello");
     let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
     assert!(output_contains_ask(&stdout), "terminated session should ask to resume, not deny: {}", stdout);
     assert!(stdout.contains("RAILGUARD"), "should mention RAILGUARD: {}", stdout);
@@ -333,12 +360,13 @@ fn terminated_session_asks_to_resume() {
 fn terminated_session_resumes_after_approval() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
 
     // Create terminated state
     let state_dir = dir.path().join(".railguard/state");
     std::fs::create_dir_all(&state_dir).unwrap();
     let state_json = serde_json::json!({
-        "session_id": "resume-approve",
+        "session_id": &sid,
         "tool_call_count": 10,
         "suspicion_level": 2,
         "warning_count": 3,
@@ -352,24 +380,24 @@ fn terminated_session_resumes_after_approval() {
         "termination_timestamp": "2026-03-22T00:00:00Z"
     });
     std::fs::write(
-        state_dir.join("resume-approve.json"),
+        state_dir.join(format!("{}.json", sid)),
         serde_json::to_string_pretty(&state_json).unwrap(),
     ).unwrap();
 
     // First call: asks to resume
-    let input1 = make_bash_input("resume-approve", cwd, "echo hello");
+    let input1 = make_bash_input(&sid, cwd, "echo hello");
     let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
     assert!(output_contains_ask(&stdout1), "should ask to resume");
 
     // Second call: approval resolved, session should be clean
-    let input2 = make_bash_input("resume-approve", cwd, "echo world");
+    let input2 = make_bash_input(&sid, cwd, "echo world");
     let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
     assert!(!output_contains_deny(&stdout2), "should not deny after approval: {}", stdout2);
     assert!(!output_contains_ask(&stdout2), "should not ask again: {}", stdout2);
 
     // Verify state was fully reset
     let state: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(state_dir.join("resume-approve.json")).unwrap()
+        &std::fs::read_to_string(state_dir.join(format!("{}.json", sid))).unwrap()
     ).unwrap();
     assert!(!state["terminated"].as_bool().unwrap_or(true), "terminated should be false");
     assert_eq!(state["suspicion_level"], 0, "suspicion should be reset");
@@ -381,12 +409,13 @@ fn terminated_session_resumes_after_approval() {
 fn terminated_session_stays_blocked_if_denied() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
 
     // Create terminated state with NO pending approval (simulates user denied)
     let state_dir = dir.path().join(".railguard/state");
     std::fs::create_dir_all(&state_dir).unwrap();
     let state_json = serde_json::json!({
-        "session_id": "resume-deny",
+        "session_id": &sid,
         "tool_call_count": 10,
         "suspicion_level": 2,
         "warning_count": 1,
@@ -402,11 +431,11 @@ fn terminated_session_stays_blocked_if_denied() {
 
     // Each call should keep asking (not silently allow)
     std::fs::write(
-        state_dir.join("resume-deny.json"),
+        state_dir.join(format!("{}.json", sid)),
         serde_json::to_string_pretty(&state_json).unwrap(),
     ).unwrap();
 
-    let input1 = make_bash_input("resume-deny", cwd, "echo hello");
+    let input1 = make_bash_input(&sid, cwd, "echo hello");
     let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
     assert!(output_contains_ask(&stdout1), "should ask: {}", stdout1);
 
@@ -416,11 +445,11 @@ fn terminated_session_stays_blocked_if_denied() {
     // To truly test denial, we'd need to clear pending_approval manually.
     // For now, we just verify it keeps asking on fresh state.
     std::fs::write(
-        state_dir.join("resume-deny.json"),
+        state_dir.join(format!("{}.json", sid)),
         serde_json::to_string_pretty(&state_json).unwrap(),
     ).unwrap();
 
-    let input2 = make_bash_input("resume-deny", cwd, "echo world");
+    let input2 = make_bash_input(&sid, cwd, "echo world");
     let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
     assert!(output_contains_ask(&stdout2), "should still ask: {}", stdout2);
 }
@@ -444,7 +473,7 @@ fn normal_commands_unaffected_by_threat_system() {
     ];
 
     for cmd in &safe_commands {
-        let input = make_bash_input("safe-test", cwd, cmd);
+        let input = make_bash_input(&unique_session_id(), cwd, cmd);
         let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
         assert!(
             !output_is_not_allowed(&stdout),
