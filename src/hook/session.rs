@@ -18,11 +18,25 @@ pub fn handle(input: &HookInput, policy: &Policy) -> HookOutput {
 
     // Anchor the session: the path fence evaluates against this root for the
     // whole session, immune to shell cwd drift from cd's into subdirectories.
+    // Persist the anchor ONLY when cwd is inside a real git project — a launch
+    // dir outside any repo (~, /tmp, a scratch dir) is an untrustworthy bare
+    // cwd that must not become the sticky session anchor, or it would drop the
+    // real project's allowed_paths once the agent cd's into the actual project.
+    // This mirrors the trustworthiness gate in pre_tool::handle.
+    let sessions_dir = crate::trace::logger::global_sessions_dir();
+    if let Some(project_root) = SessionState::anchor_to_persist(cwd) {
+        let state_dir = project_root.join(".railguard/state");
+        let mut state = SessionState::load(&state_dir, &input.session_id);
+        state.project_root = Some(project_root.display().to_string());
+        let _ = state.save(&state_dir);
+        SessionState::write_global_pointer(&sessions_dir, &input.session_id, &project_root);
+    }
+    SessionState::cleanup_old_pointers(&sessions_dir);
+
+    // Local-state housekeeping is keyed off the best-effort project root even
+    // when no anchor was persisted (a non-repo launch dir still has a state dir).
     let project_root = SessionState::find_project_root(cwd);
     let state_dir = project_root.join(".railguard/state");
-    let mut state = SessionState::load(&state_dir, &input.session_id);
-    state.project_root = Some(project_root.display().to_string());
-    let _ = state.save(&state_dir);
 
     // Check for recently terminated sessions and warn
     let terminated = SessionState::find_recent_terminations(&state_dir);

@@ -43,12 +43,20 @@ fn create_test_dir() -> TempDir {
     dir
 }
 
+fn rg_home_for(input_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(input_json)
+        .ok()
+        .and_then(|v| v.get("cwd").and_then(|c| c.as_str()).map(String::from))
+        .unwrap_or_else(|| ".".to_string())
+}
+
 fn simulate_hook(binary: &str, event: &str, input_json: &str) -> (i32, String, String) {
     let output = Command::new(binary)
         .arg("hook")
         .arg("--event")
         .arg(event)
         .env("RAILGUARD_NO_KILL", "1")
+        .env("RAILGUARD_HOME", rg_home_for(input_json))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
