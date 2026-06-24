@@ -16,6 +16,7 @@
 
 use std::io::Write;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
 fn railguard_binary() -> String {
@@ -24,8 +25,25 @@ fn railguard_binary() -> String {
     path.to_str().unwrap().to_string()
 }
 
+static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A session id unique across tests, parallelism, and `cargo test` runs.
+/// Threat state is keyed per session at `.railguard/state/{id}.json`; reusing
+/// a literal id let suspicion/approvals bleed between tests and persist on disk.
+fn unique_session_id() -> String {
+    format!(
+        "test-{}-{}",
+        std::process::id(),
+        SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 fn create_policy_dir(yaml: &str) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
+    // Anchor the project root at the tempdir so threat state lands inside it
+    // (and is dropped with the tempdir) instead of escaping up to a shared
+    // ancestor — e.g. a stray `.git` above the system temp dir.
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
     std::fs::write(dir.path().join("railguard.yaml"), yaml).unwrap();
     dir
 }
@@ -52,7 +70,7 @@ fn simulate_hook(binary: &str, input_json: &str) -> String {
 
 fn bash_input(cwd: &str, command: &str) -> String {
     serde_json::json!({
-        "session_id": "fp-test",
+        "session_id": unique_session_id(),
         "cwd": cwd,
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
