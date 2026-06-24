@@ -269,6 +269,26 @@ mod tests {
     }
 
     #[test]
+    fn test_allowed_path_matches_deep_descendant() {
+        // Issue #16: a path nested several levels under an allowed_paths entry
+        // (e.g. the repo root under `~/github`) must be allowed, not prompted.
+        let config = FenceConfig {
+            enabled: true,
+            allowed_paths: vec!["/home/u/github".to_string()],
+            denied_paths: vec![],
+            allow_local_overrides: false,
+        };
+        assert_eq!(
+            check_path(&config, "/home/u/github/railguard/src/main.rs", "/project"),
+            PathCheck::Allow
+        );
+        assert!(matches!(
+            check_path(&config, "/home/u/other/file.txt", "/project"),
+            PathCheck::OutsideProject(_)
+        ));
+    }
+
+    #[test]
     fn test_extract_path_from_bash() {
         assert_eq!(
             extract_path_from_command("cat /etc/passwd"),

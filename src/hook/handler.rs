@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::hook::{post_tool, pre_tool, session};
 use crate::policy::loader::load_policy_or_defaults;
 use crate::threat::killer::terminate_session;
+use crate::threat::state::SessionState;
 use crate::types::{HookInput, HookOutput};
 
 /// Main hook entry point. Reads JSON from stdin, dispatches to the right handler.
@@ -24,9 +25,17 @@ pub fn run(event: &str) -> i32 {
         }
     };
 
-    // Load policy
+    // Load policy anchored at the session's stable project root, not the
+    // per-call cwd. The shell cwd drifts as the agent cd's around; resolving
+    // policy from a cwd outside the project tree finds no config (the walk-up
+    // search comes up empty) and silently falls back to empty defaults,
+    // dropping the project's allowed_paths and making the fence prompt for
+    // paths the policy actually permits. Anchoring at the project root keeps
+    // the policy — and the fence it feeds — stable for the whole session.
     let cwd = Path::new(&input.cwd);
-    let policy = load_policy_or_defaults(cwd);
+    let sessions_dir = crate::trace::logger::global_sessions_dir();
+    let project_root = SessionState::resolve_project_root(cwd, &input.session_id, &sessions_dir);
+    let policy = load_policy_or_defaults(&project_root);
 
     // Dispatch
     match event {

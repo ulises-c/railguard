@@ -31,12 +31,23 @@ fn create_policy_dir(yaml: &str) -> TempDir {
     dir
 }
 
+// Isolate global railguard state (sessions/, traces/) under the test's own cwd
+// tempdir so parallel tests that reuse session ids don't collide in the real
+// ~/.railguard, and so the suite never pollutes the developer's home.
+fn rg_home_for(input_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(input_json)
+        .ok()
+        .and_then(|v| v.get("cwd").and_then(|c| c.as_str()).map(String::from))
+        .unwrap_or_else(|| ".".to_string())
+}
+
 fn simulate_hook(binary: &str, event: &str, input_json: &str) -> (i32, String) {
     let output = Command::new(binary)
         .arg("hook")
         .arg("--event")
         .arg(event)
         .env("RAILGUARD_NO_KILL", "1")
+        .env("RAILGUARD_HOME", rg_home_for(input_json))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -265,6 +276,12 @@ fn fence_write_to_aws_credentials() {
 // Issue #4: the fence anchors to the project root captured at SessionStart.
 // The shell cwd persists across tool calls, so after a `cd` into a nested dir
 // the per-call cwd drifts — repo-root paths must remain in-project.
+//
+// NOTE: the drift here is to a dir *inside* the git subtree, so resolution
+// succeeds via the cwd-walked state walk-up — this does NOT exercise the global
+// session pointer (RAILGUARD_HOME is per-call cwd here, so the two calls use
+// different homes). Genuinely-out-of-subtree drift, which forces resolution
+// through the SessionStart pointer, is covered in tests/stable_policy_anchor.rs.
 #[test]
 fn fence_anchor_survives_cwd_drift() {
     let root = create_policy_dir("version: 1\nblocklist: []\nfence:\n  enabled: true");
@@ -503,7 +520,7 @@ fn trace_logs_created() {
     let input = make_bash_input(&session_id, dir.path().to_str().unwrap(), "echo hello");
     simulate_hook(&railguard_binary(), "PreToolUse", &input);
 
-    let global_trace_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".railguard/traces");
+    let global_trace_dir = dir.path().join("traces");
     let trace_file = global_trace_dir.join(format!("{}.jsonl", session_id));
     assert!(trace_file.exists(), "trace file should be created");
 
@@ -522,7 +539,7 @@ fn trace_logs_blocked_commands() {
     let input = make_bash_input(&session_id, dir.path().to_str().unwrap(), "terraform destroy");
     simulate_hook(&railguard_binary(), "PreToolUse", &input);
 
-    let global_trace_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".railguard/traces");
+    let global_trace_dir = dir.path().join("traces");
     let trace_file = global_trace_dir.join(format!("{}.jsonl", session_id));
     assert!(trace_file.exists());
 

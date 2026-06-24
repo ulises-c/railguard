@@ -41,12 +41,24 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
     state.resolve_pending_approval();
     state.increment_tool_call();
 
-    // The fence anchors to the session's project root, not the per-call cwd.
-    // Anchor here for sessions that never ran the SessionStart hook.
-    let fence_root = state
-        .project_root
-        .get_or_insert_with(|| SessionState::find_project_root(cwd).display().to_string())
-        .clone();
+    // The fence anchors to the session's stable project root, not the per-call
+    // cwd. Resolve via the shared anchor (cwd-walked state → global pointer →
+    // git ancestor → cwd) so a cwd that drifted outside the project subtree
+    // still recovers the right root.
+    let sessions_dir = crate::trace::logger::global_sessions_dir();
+    let (resolved_root, root_source) =
+        SessionState::resolve_project_root_with_source(cwd, &input.session_id, &sessions_dir);
+    let fence_root = resolved_root.display().to_string();
+    // Only persist a TRUSTWORTHY root (existing state/pointer, or a real .git
+    // ancestor). A bare-cwd fallback — a session whose first call already drifted
+    // outside any repo — must not be persisted, or that wrong root would stick
+    // for the whole session. For a trustworthy root, (re)write the pointer every
+    // call so its mtime tracks live activity and cleanup_old_pointers never reaps
+    // a long-running session's anchor.
+    if root_source.is_trustworthy() {
+        state.project_root.get_or_insert_with(|| fence_root.clone());
+        SessionState::write_global_pointer(&sessions_dir, &input.session_id, Path::new(&fence_root));
+    }
 
     // If session was previously terminated, ask user before resuming
     if state.terminated {
@@ -276,7 +288,11 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         && policy.snapshot.tools.iter().any(|t| t == tool_name)
                     {
                         if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-                            let snap_dir = cwd.join(&policy.snapshot.directory);
+                            // Anchor snapshots at the stable fence_root, not the
+                            // per-call cwd: `railguard rollback` reads them from
+                            // the project root, so a cwd-drifted Write/Edit's
+                            // backup must still land under the project.
+                            let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
                             let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
                             let _ = capture_snapshot(&snap_dir, &input.session_id, tool_use_id, file_path);
                         }
@@ -431,7 +447,9 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 && policy.snapshot.tools.iter().any(|t| t == tool_name)
             {
                 if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-                    let snap_dir = cwd.join(&policy.snapshot.directory);
+                    // Anchor snapshots at the stable fence_root (see above): keeps
+                    // backups under the project root that `railguard rollback` reads.
+                    let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
                     let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
                     if let Err(e) =
                         capture_snapshot(&snap_dir, &input.session_id, tool_use_id, file_path)
