@@ -549,7 +549,10 @@ fn is_read_only_tool(tool_name: &str) -> bool {
 /// outside the project shouldn't trigger an "approve?" on path-shaped text it
 /// merely contains (sed/awk regex addresses, jq's `//` operator, URLs).
 /// Reducing those false prompts is the point — prompt fatigue trains the human
-/// to rubber-stamp everything.
+/// to rubber-stamp everything. Since extraction became shell-word-level
+/// (issue #17) most such text never reaches the fence; this waiver remains as
+/// second-line defense for words that are wholly path-shaped yet still data
+/// (a bare `'/foo/p'` sed program).
 ///
 /// The check is conservative and inspects *every* segment of a compound
 /// command. Looking at only the first token let `cd repo && sed -n '/fn/p' f`
