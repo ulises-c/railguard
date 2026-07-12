@@ -1,6 +1,6 @@
 # Working Under Railguard
 
-This project runs under [Railguard](https://github.com/railyard-dev/railguard), which intercepts every agent tool call (Bash, Read, Write, Edit, Memory) and decides — in under 2ms — to **allow**, **ask**, or **block** it. Policy lives in `railguard.yaml`; the full rule set is in [`docs/RULES.md`](../docs/RULES.md). Rollback recipes and the self-protection list live in the auto-managed `# Railguard — Active Guardrails` block of `CLAUDE.md`; this file covers how to *work* under it.
+This project runs under [Railguard](https://github.com/ulises-c/railguard), which intercepts every agent tool call (Bash, Read, Write, Edit, Memory) and decides — in under 2ms — to **allow**, **ask**, or **block** it. Policy lives in `railguard.yaml`; the full rule set is in [`docs/RULES.md`](../docs/RULES.md). Rollback recipes and the self-protection list live in the auto-managed `# Railguard — Active Guardrails` block of `CLAUDE.md`; this file covers how to *work* under it.
 
 ## Reading the response
 

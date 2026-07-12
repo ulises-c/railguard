@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://crates.io/crates/railguard"><img src="https://img.shields.io/crates/v/railguard.svg" alt="crates.io"></a>
-  <a href="https://github.com/railyard-dev/railguard/stargazers"><img src="https://img.shields.io/github/stars/railyard-dev/railguard?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/ulises-c/railguard/stargazers"><img src="https://img.shields.io/github/stars/ulises-c/railguard?style=flat" alt="GitHub stars"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/tests-151%20passed-brightgreen" alt="Tests">
   <img src="https://img.shields.io/badge/built%20with-Rust-orange.svg" alt="Built with Rust">
@@ -29,7 +29,7 @@
 Railguard is the middle ground.
 
 ```
-cargo install railguard
+cargo install --git https://github.com/ulises-c/railguard
 railguard install
 ```
 
@@ -138,4 +138,4 @@ Drop [`templates/AGENTS.md`](templates/AGENTS.md) into your project to tell your
 
 [Join the Discord](https://discord.gg/MyaUZSus)
 
-MIT License.
+MIT License. This project is an independent continuation of an earlier work — see [`ATTRIBUTION.md`](ATTRIBUTION.md) for its origin and license lineage.

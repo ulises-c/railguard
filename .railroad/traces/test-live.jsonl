@@ -1,2 +1,0 @@
-{"timestamp":"2026-03-11T99:99:99.000000+00:00","session_id":"test-live","event":"PreToolUse","tool":"Bash","input_summary":"echo hello","decision":"allow","duration_ms":1}
-{"timestamp":"2026-03-11T99:99:99.000000+00:00","session_id":"test-live","event":"PreToolUse","tool":"Bash","input_summary":"echo hello","decision":"allow","duration_ms":1}

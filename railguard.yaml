@@ -1,5 +1,5 @@
 # Railguard Policy Configuration
-# https://github.com/railyard-dev/railguard
+# https://github.com/ulises-c/railguard
 #
 # This file controls how Railguard protects your development environment.
 # Rules are evaluated in order: allowlist → blocklist → approve → default allow.

@@ -101,14 +101,11 @@ A malformed `.railguard.local.yaml` is warned about and ignored, never fatal.
 
 ## Contribution workflow
 
-Developed against this soft-fork's process: branch off `upstream/main`, open a
-focused PR upstream, and fold the same branch into the fork's `main` integration
-line so it's usable immediately while the upstream PR is pending.
+Branch off `main`, implement and test, then open a PR against this repo.
 
 ```
-git switch -c feat/per-project-allowlist upstream/main
+git switch -c feat/per-project-allowlist main
 # implement + test
 git push -u origin feat/per-project-allowlist
-gh pr create --repo railyard-dev/railguard --base main --head ulises-c:feat/per-project-allowlist
-git switch main && git merge --no-ff feat/per-project-allowlist && git push origin main
+gh pr create --repo ulises-c/railguard --base main --head feat/per-project-allowlist
 ```
