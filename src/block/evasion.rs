@@ -1,14 +1,14 @@
-/// Evasion detection and command normalization.
-///
-/// AI agents have been documented bypassing text-based safety rules by:
-/// - Base64 encoding commands
-/// - Using variable substitution ($CMD)
-/// - Hex encoding
-/// - String concatenation tricks
-/// - Using eval/xargs/sh -c indirection
-/// - Backtick/subshell command substitution
-///
-/// This module normalizes commands before pattern matching to catch these.
+//! Evasion detection and command normalization.
+//!
+//! AI agents have been documented bypassing text-based safety rules by:
+//! - Base64 encoding commands
+//! - Using variable substitution ($CMD)
+//! - Hex encoding
+//! - String concatenation tricks
+//! - Using eval/xargs/sh -c indirection
+//! - Backtick/subshell command substitution
+//!
+//! This module normalizes commands before pattern matching to catch these.
 
 use base64::Engine;
 use std::sync::LazyLock;
@@ -132,8 +132,7 @@ fn detect_eval_concat(cmd: &str) -> Option<String> {
     let unquoted = rest
         .replace("\"\"", "")
         .replace("''", "")
-        .replace('"', "")
-        .replace('\'', "");
+        .replace(['"', '\''], "");
 
     if unquoted != *rest {
         Some(unquoted)
@@ -144,14 +143,18 @@ fn detect_eval_concat(cmd: &str) -> Option<String> {
 
 /// Detect: CMD="terraform destroy"; $CMD  or  export X=terraform; $X destroy
 fn detect_variable_expansion(cmd: &str) -> Option<String> {
-    let re = regex::Regex::new(r#"(\w+)=["']?([^"';]+)["']?\s*[;&]\s*\$\1\b(.*)"#).ok()?;
-    if let Some(caps) = re.captures(cmd) {
+    // The regex crate has no backreferences, so capture the assigned and
+    // referenced names separately and compare them in code.
+    let re = regex::Regex::new(r#"(\w+)=["']?([^"';]+)["']?\s*[;&]\s*\$(\w+)\b"#).ok()?;
+    for caps in re.captures_iter(cmd) {
+        if caps.get(1)?.as_str() != caps.get(3)?.as_str() {
+            continue;
+        }
         let value = caps.get(2)?.as_str();
-        let rest = caps.get(3).map(|m| m.as_str()).unwrap_or("");
-        Some(format!("{}{}", value, rest))
-    } else {
-        None
+        let rest = &cmd[caps.get(0)?.end()..];
+        return Some(format!("{}{}", value, rest));
     }
+    None
 }
 
 /// Detect: sh -c "dangerous command" or bash -c "..."
@@ -229,7 +232,7 @@ fn detect_multi_variable_concat(cmd: &str) -> Option<String> {
 
     // Find the execution portion (after the last ; or &&)
     let exec_part = cmd
-        .rsplit(|c| c == ';' || c == '&')
+        .rsplit([';', '&'])
         .next()
         .unwrap_or("")
         .trim();
@@ -247,11 +250,10 @@ fn detect_multi_variable_concat(cmd: &str) -> Option<String> {
 
     // Remove surrounding quotes from the expanded result
     let expanded = expanded
-        .replace('"', "")
-        .replace('\'', "");
+        .replace(['"', '\''], "");
     let expanded = expanded.trim().to_string();
 
-    if expanded != exec_part.replace('"', "").replace('\'', "").trim() {
+    if expanded != exec_part.replace(['"', '\''], "").trim() {
         Some(expanded)
     } else {
         None
@@ -1017,6 +1019,30 @@ mod tests {
         let cmd = r#"CMD="terraform destroy"; $CMD"#;
         let variants = normalize_command(cmd);
         assert!(variants.iter().any(|v| v.contains("terraform destroy")));
+    }
+
+    #[test]
+    fn test_variable_expansion_unquoted_single_var() {
+        // Regression for the dead-backreference bug: the unquoted form is not
+        // covered by detect_multi_variable_concat (its assignment regex
+        // requires quotes), so only detect_variable_expansion catches it.
+        let cmd = "CMD=terraform; $CMD destroy";
+        let expanded = detect_variable_expansion(cmd);
+        assert_eq!(expanded.as_deref(), Some("terraform destroy"));
+        let variants = normalize_command(cmd);
+        assert!(
+            variants.iter().any(|v| v.contains("terraform destroy")),
+            "unquoted single-var expansion should normalize: {:?}",
+            variants
+        );
+    }
+
+    #[test]
+    fn test_variable_expansion_skips_mismatched_reference() {
+        assert_eq!(detect_variable_expansion("A=foo; $B run"), None);
+        // A later matching pair is still found after a mismatched one.
+        let expanded = detect_variable_expansion("A=foo; $B; C=terraform; $C destroy");
+        assert_eq!(expanded.as_deref(), Some("terraform destroy"));
     }
 
     #[test]
