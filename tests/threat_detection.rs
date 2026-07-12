@@ -1,11 +1,11 @@
-/// Threat Detection Integration Tests
-///
-/// Tests the "Ask the Human" system:
-/// - Tier 1: Ask user on unambiguous evasion, allow if approved
-/// - Tier 2: Warning on first occurrence, ask on second
-/// - Tier 3: Behavioral retry detection — ask, then allow if approved
-/// - Session approvals persist within a session
-/// - Session state persistence
+//! Threat Detection Integration Tests
+//!
+//! Tests the "Ask the Human" system:
+//! - Tier 1: Ask user on unambiguous evasion, allow if approved
+//! - Tier 2: Warning on first occurrence, ask on second
+//! - Tier 3: Behavioral retry detection — ask, then allow if approved
+//! - Session approvals persist within a session
+//! - Session state persistence
 
 use std::io::Write;
 use std::process::Command;
@@ -319,7 +319,7 @@ fn session_approvals_persist_in_state() {
         serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
     assert!(state2["pending_approval"].is_null(), "pending should be resolved");
     assert!(
-        state2["session_approvals"].as_array().unwrap().len() > 0,
+        !state2["session_approvals"].as_array().unwrap().is_empty(),
         "should have session approvals"
     );
 }

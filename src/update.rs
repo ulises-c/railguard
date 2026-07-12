@@ -19,6 +19,7 @@ pub struct ReleaseInfo {
 /// Check for updates. Two checks:
 /// 1. Security tag — every session, <100ms. For emergency patches.
 /// 2. Main branch — once per week. For normal updates.
+///
 /// Returns a message if an update exists.
 pub fn check_for_update(cwd: &Path) -> Option<String> {
     // Always check for emergency security patches

@@ -74,11 +74,9 @@ pub fn load_entries(cwd: &Path) -> Vec<MemoryEntry> {
 
     let reader = std::io::BufReader::new(file);
     let mut entries = Vec::new();
-    for line in reader.lines() {
-        if let Ok(line) = line {
-            if let Ok(entry) = serde_json::from_str::<MemoryEntry>(&line) {
-                entries.push(entry);
-            }
+    for line in reader.lines().map_while(Result::ok) {
+        if let Ok(entry) = serde_json::from_str::<MemoryEntry>(&line) {
+            entries.push(entry);
         }
     }
     entries
@@ -88,9 +86,7 @@ pub fn load_entries(cwd: &Path) -> Vec<MemoryEntry> {
 pub fn latest_entry_for_file(cwd: &Path, file_path: &str) -> Option<MemoryEntry> {
     let entries = load_entries(cwd);
     entries
-        .into_iter()
-        .filter(|e| e.file_path == file_path)
-        .last()
+        .into_iter().rfind(|e| e.file_path == file_path)
 }
 
 /// Verify integrity of all memory files.

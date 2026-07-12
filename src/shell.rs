@@ -1,11 +1,11 @@
-/// railguard-shell: A POSIX shell shim that wraps every command in an OS sandbox.
-///
-/// Claude Code calls this as its shell (via CLAUDE_CODE_SHELL env var).
-/// Every `Bash` tool call runs: railguard-shell -c "command"
-/// Which becomes: sandbox-exec -f profile.sb -- /bin/sh -c "command"
-///
-/// The user never changes their workflow. They type `claude` as normal.
-/// Every shell command is kernel-sandboxed transparently.
+//! railguard-shell: A POSIX shell shim that wraps every command in an OS sandbox.
+//!
+//! Claude Code calls this as its shell (via CLAUDE_CODE_SHELL env var).
+//! Every `Bash` tool call runs: railguard-shell -c "command"
+//! Which becomes: sandbox-exec -f profile.sb -- /bin/sh -c "command"
+//!
+//! The user never changes their workflow. They type `claude` as normal.
+//! Every shell command is kernel-sandboxed transparently.
 
 use std::env;
 use std::path::Path;

@@ -421,16 +421,14 @@ fn precise_step_back_through_edit_history() {
     let snap_dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("evolving.txt");
 
-    let versions = vec![
-        "v1: initial",
+    let versions = ["v1: initial",
         "v2: add feature A",
         "v3: refactor",
         "v4: add feature B",
         "v5: fix bug in A",
         "v6: optimization",
         "v7: add feature C",
-        "v8: everything breaks",
-    ];
+        "v8: everything breaks"];
 
     // Write v1
     fs::write(&file, versions[0]).unwrap();
@@ -511,7 +509,7 @@ fn manifest_records_complete_edit_history() {
             &format!("tool-{}", i),
             file.to_str().unwrap(),
         );
-        fs::write(&file, &format!("edit {}", i)).unwrap();
+        fs::write(&file, format!("edit {}", i)).unwrap();
     }
 
     let manifest = railguard::snapshot::capture::read_manifest(snap_dir.path(), "s1").unwrap();

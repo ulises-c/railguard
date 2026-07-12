@@ -1,15 +1,15 @@
-/// Attack Simulation Tests
-///
-/// These tests simulate real-world attack scenarios documented in incidents
-/// where AI agents caused destructive operations. Every test represents
-/// a real pattern that has been observed or reported.
-///
-/// Categories:
-/// 1. Direct destructive commands (real incidents)
-/// 2. Evasion attempts (agent bypasses)
-/// 3. Path fence violations (credential/system file access)
-/// 4. Policy evaluation edge cases
-/// 5. Snapshot integrity
+//! Attack Simulation Tests
+//!
+//! These tests simulate real-world attack scenarios documented in incidents
+//! where AI agents caused destructive operations. Every test represents
+//! a real pattern that has been observed or reported.
+//!
+//! Categories:
+//! 1. Direct destructive commands (real incidents)
+//! 2. Evasion attempts (agent bypasses)
+//! 3. Path fence violations (credential/system file access)
+//! 4. Policy evaluation edge cases
+//! 5. Snapshot integrity
 
 // We need to import from the binary crate.
 // Since this is an integration test, we test via the CLI.

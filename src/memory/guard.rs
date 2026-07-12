@@ -238,11 +238,7 @@ fn is_memory_delete_command(cmd: &str) -> bool {
 
 /// Extract the memory directory from a memory file path.
 fn extract_memory_dir(file_path: &str) -> Option<String> {
-    if let Some(idx) = file_path.rfind("/memory/") {
-        Some(file_path[..idx + 8].to_string())
-    } else {
-        None
-    }
+    file_path.rfind("/memory/").map(|idx| file_path[..idx + 8].to_string())
 }
 
 /// Shorten a path for display by showing just the relevant parts.

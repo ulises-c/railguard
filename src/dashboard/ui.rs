@@ -290,7 +290,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let is_terminated = app
         .worst_threat_state()
-        .map_or(false, |s| s.terminated);
+        .is_some_and(|s| s.terminated);
 
     let bar_style = if is_terminated {
         Style::default().bg(Color::Red).fg(TEXT).bold()

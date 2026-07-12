@@ -222,15 +222,13 @@ fn compute_diff(
 
     // Limit diff output to avoid overwhelming the context
     let max_lines = 100;
-    let mut line_count = 0;
-    for change in &changes {
+    for (line_count, change) in changes.iter().enumerate() {
         if line_count >= max_lines {
             diff.push_str(&format!("\n... ({} more lines)\n", changes.len() - line_count));
             break;
         }
         diff.push_str(change);
         diff.push('\n');
-        line_count += 1;
     }
 
     Some(diff)
@@ -255,33 +253,27 @@ fn simple_diff(original: &[&str], current: &[&str]) -> Vec<String> {
 
         // Look ahead in current for a match with original[i]
         if i < original.len() {
-            for k in j..std::cmp::min(j + 5, current.len()) {
-                if current[k] == original[i] {
-                    // Lines j..k are additions
-                    for line in &current[j..k] {
-                        changes.push(format!("+ {}", line));
-                    }
-                    j = k;
-                    found = true;
-                    break;
+            let end = std::cmp::min(j + 5, current.len());
+            if let Some(k) = (j..end).find(|&k| current[k] == original[i]) {
+                // Lines j..k are additions
+                for line in &current[j..k] {
+                    changes.push(format!("+ {}", line));
                 }
+                j = k;
+                found = true;
             }
         }
 
-        if !found {
+        if !found && j < current.len() {
             // Look ahead in original for a match with current[j]
-            if j < current.len() {
-                for k in i..std::cmp::min(i + 5, original.len()) {
-                    if original[k] == current[j] {
-                        // Lines i..k are removals
-                        for line in &original[i..k] {
-                            changes.push(format!("- {}", line));
-                        }
-                        i = k;
-                        found = true;
-                        break;
-                    }
+            let end = std::cmp::min(i + 5, original.len());
+            if let Some(k) = (i..end).find(|&k| original[k] == current[j]) {
+                // Lines i..k are removals
+                for line in &original[i..k] {
+                    changes.push(format!("- {}", line));
                 }
+                i = k;
+                found = true;
             }
         }
 

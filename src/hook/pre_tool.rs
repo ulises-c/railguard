@@ -592,7 +592,7 @@ fn is_read_only_command(cmd: &str) -> bool {
     // read-only. `cd`/`pushd`/`popd` are navigation and don't disqualify.
     // (Split is connector-naive; a connector char inside a quoted program at
     // worst yields a non-read-only verdict — more fencing, never less.)
-    cmd.split(|c: char| c == ';' || c == '|' || c == '&')
+    cmd.split([';', '|', '&'])
         .map(str::trim)
         .filter(|seg| !seg.is_empty())
         .all(|seg| {

@@ -65,28 +65,25 @@ pub fn check_conflicts(
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_default();
 
-                let reason = if new_name.is_some()
-                    && existing_name.is_some()
-                    && new_name == existing_name
-                {
-                    format!(
+                let reason = match (&new_name, &existing_name) {
+                    (Some(new), Some(existing)) if new == existing => format!(
                         "New memory has same name '{}' as existing memory '{}'",
-                        new_name.unwrap(),
-                        file_name
-                    )
-                } else {
-                    let shared: Vec<_> = overlap.into_iter().take(5).cloned().collect();
-                    let desc_note = if let Some(ref desc) = new_description {
-                        format!(" ({})", desc)
-                    } else {
-                        String::new()
-                    };
-                    format!(
-                        "New memory{} shares significant keyword overlap with '{}': [{}]",
-                        desc_note,
-                        file_name,
-                        shared.join(", ")
-                    )
+                        new, file_name
+                    ),
+                    _ => {
+                        let shared: Vec<_> = overlap.into_iter().take(5).cloned().collect();
+                        let desc_note = if let Some(ref desc) = new_description {
+                            format!(" ({})", desc)
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "New memory{} shares significant keyword overlap with '{}': [{}]",
+                            desc_note,
+                            file_name,
+                            shared.join(", ")
+                        )
+                    }
                 };
 
                 return Some((existing_path, reason));

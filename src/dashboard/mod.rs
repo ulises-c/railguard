@@ -247,7 +247,7 @@ fn run_tui(session: Option<String>, trace_dir: &Path, state_dir: &Path) -> io::R
     Ok(())
 }
 
-fn reload_data(app: &mut App, trace_dir: &std::path::PathBuf, state_dir: &std::path::PathBuf) {
+fn reload_data(app: &mut App, trace_dir: &Path, state_dir: &Path) {
     // Load traces from all sessions (or pinned session)
     let sessions = if let Some(ref pinned) = app.pinned_session {
         vec![pinned.clone()]
