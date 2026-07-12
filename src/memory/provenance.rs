@@ -74,7 +74,10 @@ pub fn load_entries(cwd: &Path) -> Vec<MemoryEntry> {
 
     let reader = std::io::BufReader::new(file);
     let mut entries = Vec::new();
-    for line in reader.lines().map_while(Result::ok) {
+    for line in reader.lines() {
+        // Skip unreadable lines (e.g. a corrupt partial write) instead of
+        // truncating the log there — later entries must stay visible.
+        let Ok(line) = line else { continue };
         if let Ok(entry) = serde_json::from_str::<MemoryEntry>(&line) {
             entries.push(entry);
         }

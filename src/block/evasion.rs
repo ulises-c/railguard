@@ -143,18 +143,48 @@ fn detect_eval_concat(cmd: &str) -> Option<String> {
     }
 }
 
-/// Detect: CMD="terraform destroy"; $CMD  or  export X=terraform; $X destroy
+static VAR_EXPANSION_ASSIGN_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r#"(\w+)=(?:"([^"]*)"|'([^']*)'|([^\s;&|"']+))"#).unwrap());
+
+/// Detect: CMD="terraform destroy"; $CMD  or  X=terraform && $X destroy
+///
+/// The regex crate has no backreferences, so instead of matching
+/// assignment and reference in one pattern, parse each assignment and
+/// search the remainder for a bare `$name` reference. This also survives
+/// decoy pairs (`A=v; $AB=x; $AB`) that a single left-to-right
+/// non-overlapping scan would consume.
 fn detect_variable_expansion(cmd: &str) -> Option<String> {
-    // The regex crate has no backreferences, so capture the assigned and
-    // referenced names separately and compare them in code.
-    let re = regex::Regex::new(r#"(\w+)=["']?([^"';]+)["']?\s*[;&]\s*\$(\w+)\b"#).ok()?;
-    for caps in re.captures_iter(cmd) {
-        if caps.get(1)?.as_str() != caps.get(3)?.as_str() {
-            continue;
+    for caps in VAR_EXPANSION_ASSIGN_RE.captures_iter(cmd) {
+        let name = caps.get(1)?.as_str();
+        let value = caps
+            .get(2)
+            .or_else(|| caps.get(3))
+            .or_else(|| caps.get(4))?
+            .as_str();
+        let after = &cmd[caps.get(0)?.end()..];
+        if let Some(pos) = find_bare_var_ref(after, name) {
+            let rest = &after[pos + name.len() + 1..];
+            return Some(format!("{}{}", value, rest));
         }
-        let value = caps.get(2)?.as_str();
-        let rest = &cmd[caps.get(0)?.end()..];
-        return Some(format!("{}{}", value, rest));
+    }
+    None
+}
+
+/// Find `$name` in `s` where it is not a prefix of a longer variable name.
+fn find_bare_var_ref(s: &str, name: &str) -> Option<usize> {
+    let pat = format!("${}", name);
+    let mut start = 0;
+    while let Some(i) = s[start..].find(&pat) {
+        let abs = start + i;
+        let end = abs + pat.len();
+        let at_boundary = s[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if at_boundary {
+            return Some(abs);
+        }
+        start = end;
     }
     None
 }
@@ -1036,6 +1066,25 @@ mod tests {
         // A later matching pair is still found after a mismatched one.
         let expanded = detect_variable_expansion("A=foo; $B; C=terraform; $C destroy");
         assert_eq!(expanded.as_deref(), Some("terraform destroy"));
+    }
+
+    #[test]
+    fn test_variable_expansion_decoy_pair_does_not_mask_real_one() {
+        // A decoy assignment/reference whose names share a prefix must not
+        // consume the genuine pair (found by adversarial review).
+        let expanded = detect_variable_expansion("A=v; $AB=terraform; $AB destroy");
+        assert_eq!(expanded.as_deref(), Some("terraform destroy"));
+    }
+
+    #[test]
+    fn test_variable_expansion_and_separator_stays_clean() {
+        // `&&`-chained assignments must not leak a stray `&` into the
+        // expanded variant (would break downstream contiguous matching).
+        let expanded = detect_variable_expansion("X=danger && $X -rf /");
+        assert_eq!(expanded.as_deref(), Some("danger -rf /"));
+
+        let expanded = detect_variable_expansion(r#"V="two words" && $V"#);
+        assert_eq!(expanded.as_deref(), Some("two words"));
     }
 
     #[test]
