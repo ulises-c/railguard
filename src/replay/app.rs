@@ -46,9 +46,21 @@ impl ReplayApp {
 
     pub fn summary(&self) -> ReplaySummary {
         let total = self.entries.len();
-        let allowed = self.entries.iter().filter(|e| e.decision == "allow" || e.decision == "completed").count();
-        let blocked = self.entries.iter().filter(|e| e.decision == "block").count();
-        let approved = self.entries.iter().filter(|e| e.decision == "approve" || e.decision == "warn").count();
+        let allowed = self
+            .entries
+            .iter()
+            .filter(|e| e.decision == "allow" || e.decision == "completed")
+            .count();
+        let blocked = self
+            .entries
+            .iter()
+            .filter(|e| e.decision == "block")
+            .count();
+        let approved = self
+            .entries
+            .iter()
+            .filter(|e| e.decision == "approve" || e.decision == "warn")
+            .count();
 
         let duration = if self.entries.len() >= 2 {
             let first = &self.entries[0].timestamp;
@@ -67,7 +79,9 @@ impl ReplayApp {
         };
 
         // Unique files touched
-        let files: std::collections::HashSet<&str> = self.entries.iter()
+        let files: std::collections::HashSet<&str> = self
+            .entries
+            .iter()
             .filter(|e| matches!(e.tool.as_str(), "Write" | "Edit" | "Read"))
             .map(|e| e.input_summary.as_str())
             .collect();

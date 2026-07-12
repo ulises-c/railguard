@@ -21,8 +21,8 @@ pub fn capture_snapshot(
     let existed = target.exists();
 
     let (hash, content) = if existed {
-        let content = fs::read(target)
-            .map_err(|e| format!("Failed to read file for snapshot: {}", e))?;
+        let content =
+            fs::read(target).map_err(|e| format!("Failed to read file for snapshot: {}", e))?;
         let mut hasher = Sha256::new();
         hasher.update(&content);
         let hash = hex::encode(hasher.finalize());
@@ -162,10 +162,22 @@ mod tests {
 
         let target = dir.path().join("test.txt");
         fs::write(&target, "version 1").unwrap();
-        capture_snapshot(snap_dir.path(), "session-1", "tool-1", target.to_str().unwrap()).unwrap();
+        capture_snapshot(
+            snap_dir.path(),
+            "session-1",
+            "tool-1",
+            target.to_str().unwrap(),
+        )
+        .unwrap();
 
         fs::write(&target, "version 2").unwrap();
-        capture_snapshot(snap_dir.path(), "session-1", "tool-2", target.to_str().unwrap()).unwrap();
+        capture_snapshot(
+            snap_dir.path(),
+            "session-1",
+            "tool-2",
+            target.to_str().unwrap(),
+        )
+        .unwrap();
 
         let manifest = read_manifest(snap_dir.path(), "session-1").unwrap();
         assert_eq!(manifest.len(), 2);

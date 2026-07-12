@@ -72,7 +72,11 @@ impl App {
                 e.tool.to_lowercase().contains(&query)
                     || e.input_summary.to_lowercase().contains(&query)
                     || e.decision.to_lowercase().contains(&query)
-                    || e.rule.as_deref().unwrap_or("").to_lowercase().contains(&query)
+                    || e.rule
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&query)
                     || e.session_id.to_lowercase().contains(&query)
             })
             .map(|(i, _)| i)
@@ -133,18 +137,24 @@ impl App {
     }
 
     pub fn count_by_decision(&self, decision: &str) -> usize {
-        self.entries.iter().filter(|e| e.decision == decision).count()
+        self.entries
+            .iter()
+            .filter(|e| e.decision == decision)
+            .count()
     }
 
     /// Get the most concerning threat state across all sessions.
     pub fn worst_threat_state(&self) -> Option<&SessionState> {
-        self.session_states
-            .iter()
-            .max_by_key(|s| {
-                if s.terminated { 3 }
-                else if s.is_in_heightened_state() { 2 }
-                else if s.suspicion_level > 0 { 1 }
-                else { 0 }
-            })
+        self.session_states.iter().max_by_key(|s| {
+            if s.terminated {
+                3
+            } else if s.is_in_heightened_state() {
+                2
+            } else if s.suspicion_level > 0 {
+                1
+            } else {
+                0
+            }
+        })
     }
 }

@@ -179,12 +179,8 @@ fn rollback_single_file_leaves_others_intact() {
     fs::write(&bad_file, "bad modified (revert this)").unwrap();
 
     // Only rollback the bad file
-    railguard::snapshot::rollback::rollback_file(
-        snap_dir.path(),
-        "s1",
-        bad_file.to_str().unwrap(),
-    )
-    .unwrap();
+    railguard::snapshot::rollback::rollback_file(snap_dir.path(), "s1", bad_file.to_str().unwrap())
+        .unwrap();
 
     // Good file should still be modified
     assert_eq!(
@@ -227,13 +223,9 @@ fn context_includes_file_changes_and_rollback_commands() {
     fs::write(&file, "fn main() { new_code(); }").unwrap();
 
     // Generate context
-    let context = railguard::context::generate_context(
-        trace_dir.path(),
-        snap_dir.path(),
-        "s1",
-        false,
-    )
-    .unwrap();
+    let context =
+        railguard::context::generate_context(trace_dir.path(), snap_dir.path(), "s1", false)
+            .unwrap();
 
     // Context should include key information
     assert!(context.contains("Session Context: s1"));
@@ -282,12 +274,8 @@ fn diff_shows_changes_between_snapshot_and_current() {
     create_session(snap_dir.path(), "s1", "t1", file.to_str().unwrap());
     fs::write(&file, "hello changed world\n").unwrap();
 
-    let diff = railguard::context::show_diff(
-        snap_dir.path(),
-        "s1",
-        Some(file.to_str().unwrap()),
-    )
-    .unwrap();
+    let diff =
+        railguard::context::show_diff(snap_dir.path(), "s1", Some(file.to_str().unwrap())).unwrap();
 
     assert!(diff.contains("test.txt"));
     // Should show something changed
@@ -314,13 +302,9 @@ fn context_shows_blocked_commands() {
     };
     railguard::trace::logger::log_trace(trace_dir.path(), "s1", &trace).unwrap();
 
-    let context = railguard::context::generate_context(
-        trace_dir.path(),
-        snap_dir.path(),
-        "s1",
-        false,
-    )
-    .unwrap();
+    let context =
+        railguard::context::generate_context(trace_dir.path(), snap_dir.path(), "s1", false)
+            .unwrap();
 
     assert!(context.contains("Blocked Commands"));
     assert!(context.contains("terraform destroy"));
@@ -343,20 +327,42 @@ fn digital_twin_fork_and_rollback() {
     // Original codebase
     fs::write(&api_rs, "pub fn handle_request() -> Response { ok() }").unwrap();
     fs::write(&db_rs, "pub fn query() -> Vec<Row> { vec![] }").unwrap();
-    fs::write(&test_rs, "fn test_api() { assert!(handle_request().is_ok()); }").unwrap();
+    fs::write(
+        &test_rs,
+        "fn test_api() { assert!(handle_request().is_ok()); }",
+    )
+    .unwrap();
 
     // Snapshot everything (session 1: the "good" state)
     create_session(snap_dir.path(), "attempt-1", "t1", api_rs.to_str().unwrap());
     create_session(snap_dir.path(), "attempt-1", "t2", db_rs.to_str().unwrap());
-    create_session(snap_dir.path(), "attempt-1", "t3", test_rs.to_str().unwrap());
+    create_session(
+        snap_dir.path(),
+        "attempt-1",
+        "t3",
+        test_rs.to_str().unwrap(),
+    );
 
     // Agent attempt 1: tries to add caching but breaks everything
-    fs::write(&api_rs, "pub fn handle_request() -> Response { cache.get_or_else(|| panic!()) }").unwrap();
-    fs::write(&db_rs, "pub fn query() -> Vec<Row> { CACHE.lock().unwrap() }").unwrap();
-    fs::write(&test_rs, "fn test_api() { /* tests removed because they fail */ }").unwrap();
+    fs::write(
+        &api_rs,
+        "pub fn handle_request() -> Response { cache.get_or_else(|| panic!()) }",
+    )
+    .unwrap();
+    fs::write(
+        &db_rs,
+        "pub fn query() -> Vec<Row> { CACHE.lock().unwrap() }",
+    )
+    .unwrap();
+    fs::write(
+        &test_rs,
+        "fn test_api() { /* tests removed because they fail */ }",
+    )
+    .unwrap();
 
     // That's bad! Rollback the entire attempt
-    let msgs = railguard::snapshot::rollback::rollback_session(snap_dir.path(), "attempt-1").unwrap();
+    let msgs =
+        railguard::snapshot::rollback::rollback_session(snap_dir.path(), "attempt-1").unwrap();
     assert_eq!(msgs.len(), 3);
 
     // Verify we're back to the original "good" state
@@ -376,10 +382,16 @@ fn digital_twin_fork_and_rollback() {
     // Now agent attempt 2 can take a different approach from the clean state
     // (In real usage, Claude would read the context and try something different)
     create_session(snap_dir.path(), "attempt-2", "t1", api_rs.to_str().unwrap());
-    fs::write(&api_rs, "pub fn handle_request() -> Response { let data = query(); ok_with(data) }").unwrap();
+    fs::write(
+        &api_rs,
+        "pub fn handle_request() -> Response { let data = query(); ok_with(data) }",
+    )
+    .unwrap();
 
     // This time it's good! The original db.rs and test.rs are untouched.
-    assert!(fs::read_to_string(&db_rs).unwrap().contains("pub fn query()"));
+    assert!(fs::read_to_string(&db_rs)
+        .unwrap()
+        .contains("pub fn query()"));
     assert!(fs::read_to_string(&test_rs).unwrap().contains("assert!"));
 }
 
@@ -421,14 +433,16 @@ fn precise_step_back_through_edit_history() {
     let snap_dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("evolving.txt");
 
-    let versions = ["v1: initial",
+    let versions = [
+        "v1: initial",
         "v2: add feature A",
         "v3: refactor",
         "v4: add feature B",
         "v5: fix bug in A",
         "v6: optimization",
         "v7: add feature C",
-        "v8: everything breaks"];
+        "v8: everything breaks",
+    ];
 
     // Write v1
     fs::write(&file, versions[0]).unwrap();
@@ -521,7 +535,9 @@ fn manifest_records_complete_edit_history() {
     assert_eq!(tool_ids.len(), 10);
 
     // Each entry should have the same file path
-    assert!(manifest.iter().all(|e| e.file_path == file.to_str().unwrap()));
+    assert!(manifest
+        .iter()
+        .all(|e| e.file_path == file.to_str().unwrap()));
 }
 
 // ── Test: Context output is valid for LLM consumption ────────────
@@ -567,13 +583,9 @@ fn context_output_is_structured_and_complete() {
         railguard::trace::logger::log_trace(trace_dir.path(), "s1", &trace).unwrap();
     }
 
-    let context = railguard::context::generate_context(
-        trace_dir.path(),
-        snap_dir.path(),
-        "s1",
-        false,
-    )
-    .unwrap();
+    let context =
+        railguard::context::generate_context(trace_dir.path(), snap_dir.path(), "s1", false)
+            .unwrap();
 
     // Verify structure
     assert!(context.contains("# Railguard Session Context"));

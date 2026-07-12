@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::time::{SystemTime, Duration};
+use std::time::{Duration, SystemTime};
 
 const REMOTE_URL: &str = "https://github.com/ulises-c/railguard.git";
 const GITHUB_REPO: &str = "ulises-c/railguard";
@@ -33,7 +33,10 @@ pub fn check_for_update(cwd: &Path) -> Option<String> {
 
 /// Fetch the latest release info from GitHub.
 pub fn fetch_latest_release() -> Result<ReleaseInfo, String> {
-    let url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        GITHUB_REPO
+    );
 
     let output = Command::new("curl")
         .args(["-fsSL", "-H", "Accept: application/vnd.github+json", &url])
@@ -44,11 +47,11 @@ pub fn fetch_latest_release() -> Result<ReleaseInfo, String> {
         return Err("Could not fetch release info from GitHub".to_string());
     }
 
-    let body = String::from_utf8(output.stdout)
-        .map_err(|_| "Invalid UTF-8 in response".to_string())?;
+    let body =
+        String::from_utf8(output.stdout).map_err(|_| "Invalid UTF-8 in response".to_string())?;
 
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse release JSON: {}", e))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Failed to parse release JSON: {}", e))?;
 
     let tag = json["tag_name"]
         .as_str()
@@ -57,10 +60,7 @@ pub fn fetch_latest_release() -> Result<ReleaseInfo, String> {
 
     let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
 
-    let release_body = json["body"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let release_body = json["body"].as_str().unwrap_or("").to_string();
 
     Ok(ReleaseInfo {
         tag,
@@ -71,11 +71,8 @@ pub fn fetch_latest_release() -> Result<ReleaseInfo, String> {
 
 /// Compare two semver strings. Returns true if `remote` is newer than `local`.
 pub fn is_newer(local: &str, remote: &str) -> bool {
-    let parse = |v: &str| -> Vec<u64> {
-        v.split('.')
-            .filter_map(|s| s.parse::<u64>().ok())
-            .collect()
-    };
+    let parse =
+        |v: &str| -> Vec<u64> { v.split('.').filter_map(|s| s.parse::<u64>().ok()).collect() };
     let l = parse(local);
     let r = parse(remote);
     r > l
@@ -91,8 +88,14 @@ fn detect_target() -> Option<String> {
     let os_output = Command::new("uname").arg("-s").output().ok()?;
     let arch_output = Command::new("uname").arg("-m").output().ok()?;
 
-    let os = String::from_utf8(os_output.stdout).ok()?.trim().to_lowercase();
-    let arch = String::from_utf8(arch_output.stdout).ok()?.trim().to_string();
+    let os = String::from_utf8(os_output.stdout)
+        .ok()?
+        .trim()
+        .to_lowercase();
+    let arch = String::from_utf8(arch_output.stdout)
+        .ok()?
+        .trim()
+        .to_string();
 
     let os_label = match os.as_str() {
         "darwin" => "apple-darwin",
@@ -249,7 +252,11 @@ pub fn run_update(check_only: bool) -> i32 {
     println!("{}", "update available".yellow());
     println!();
     println!("  Current version: {}", current.cyan());
-    println!("  Latest release:  {} ({})", release.version.green().bold(), release.tag);
+    println!(
+        "  Latest release:  {} ({})",
+        release.version.green().bold(),
+        release.tag
+    );
 
     // 3. Show changelog if available
     if !release.body.is_empty() {
@@ -262,7 +269,10 @@ pub fn run_update(check_only: bool) -> i32 {
 
     if check_only {
         println!();
-        println!("  Run {} to install this update.", "railguard update".cyan());
+        println!(
+            "  Run {} to install this update.",
+            "railguard update".cyan()
+        );
         return 0;
     }
 

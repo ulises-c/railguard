@@ -6,11 +6,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::prelude::*;
 
-use crate::{trace, threat::state::SessionState};
+use crate::{threat::state::SessionState, trace};
 use app::{App, Filter, Mode};
 
 /// Run the dashboard TUI.
@@ -49,9 +51,16 @@ pub fn run_stream(session: Option<String>, history: bool) -> i32 {
             }
         }
         if !history {
-            eprintln!("{} historical entries (use --history to show them)\n", count);
+            eprintln!(
+                "{} historical entries (use --history to show them)\n",
+                count
+            );
         }
-        if history { 0 } else { count }
+        if history {
+            0
+        } else {
+            count
+        }
     };
 
     let mut seen_count: usize = initial_count;
@@ -83,7 +92,9 @@ pub fn run_stream(session: Option<String>, history: bool) -> i32 {
                 };
 
                 let time = extract_time(&entry.timestamp);
-                let rule_info = entry.rule.as_deref()
+                let rule_info = entry
+                    .rule
+                    .as_deref()
                     .map(|r| format!(" ({})", r))
                     .unwrap_or_default();
 
@@ -186,7 +197,9 @@ fn run_tui(session: Option<String>, trace_dir: &Path, state_dir: &Path) -> io::R
                     } else {
                         match key.code {
                             KeyCode::Char('q') => break,
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break
+                            }
                             KeyCode::Up | KeyCode::Char('k') => {
                                 app.scroll_up();
                                 app.tailing = false;

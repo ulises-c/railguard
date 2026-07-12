@@ -236,8 +236,8 @@ impl SessionState {
         let path = Self::state_path(state_dir, &self.session_id);
         let tmp_path = path.with_extension("json.tmp");
 
-        let data = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("serialize state: {}", e))?;
+        let data =
+            serde_json::to_string_pretty(self).map_err(|e| format!("serialize state: {}", e))?;
 
         fs::write(&tmp_path, data).map_err(|e| format!("write state: {}", e))?;
         fs::rename(&tmp_path, &path).map_err(|e| format!("rename state: {}", e))?;
@@ -382,7 +382,12 @@ mod tests {
         state.tool_call_count = 10;
         assert!(!state.is_in_heightened_state());
 
-        state.record_block("terraform destroy", "terraform-destroy", vec!["terraform".into(), "destroy".into()], 1);
+        state.record_block(
+            "terraform destroy",
+            "terraform-destroy",
+            vec!["terraform".into(), "destroy".into()],
+            1,
+        );
         assert!(state.is_in_heightened_state());
 
         // Still heightened at call 12 (10 + 3 = 13)
@@ -455,8 +460,11 @@ mod tests {
         // A conflicting pointer must be ignored while local state resolves.
         SessionState::write_global_pointer(sessions.path(), "resolve-state", Path::new("/wrong"));
 
-        let (resolved, source) =
-            SessionState::resolve_project_root_with_source(root.path(), "resolve-state", sessions.path());
+        let (resolved, source) = SessionState::resolve_project_root_with_source(
+            root.path(),
+            "resolve-state",
+            sessions.path(),
+        );
         assert_eq!(resolved, root.path());
         assert_eq!(source, RootSource::LocalState);
     }
@@ -471,8 +479,11 @@ mod tests {
         let sessions = tempfile::tempdir().unwrap();
         SessionState::write_global_pointer(sessions.path(), "resolve-ptr", real.path());
 
-        let (resolved, source) =
-            SessionState::resolve_project_root_with_source(outside.path(), "resolve-ptr", sessions.path());
+        let (resolved, source) = SessionState::resolve_project_root_with_source(
+            outside.path(),
+            "resolve-ptr",
+            sessions.path(),
+        );
         assert_eq!(resolved, real.path());
         assert_eq!(source, RootSource::Pointer);
     }
@@ -498,8 +509,11 @@ mod tests {
         // untrustworthy so the caller does not persist it as the sticky anchor.
         let outside = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
-        let (root, source) =
-            SessionState::resolve_project_root_with_source(outside.path(), "fresh", sessions.path());
+        let (root, source) = SessionState::resolve_project_root_with_source(
+            outside.path(),
+            "fresh",
+            sessions.path(),
+        );
         assert_eq!(root, outside.path());
         assert_eq!(source, RootSource::CwdFallback);
         assert!(!source.is_trustworthy());
@@ -520,8 +534,11 @@ mod tests {
         state.save(&state_dir).unwrap();
         let sessions = tempfile::tempdir().unwrap();
 
-        let (resolved, source) =
-            SessionState::resolve_project_root_with_source(root.path(), "poisoned", sessions.path());
+        let (resolved, source) = SessionState::resolve_project_root_with_source(
+            root.path(),
+            "poisoned",
+            sessions.path(),
+        );
         assert_eq!(resolved, root.path());
         assert_eq!(source, RootSource::GitAncestor);
     }
@@ -548,7 +565,10 @@ mod tests {
         std::fs::create_dir_all(repo.path().join(".git")).unwrap();
         let nested = repo.path().join("a/b");
         std::fs::create_dir_all(&nested).unwrap();
-        assert_eq!(SessionState::anchor_to_persist(&nested), Some(repo.path().to_path_buf()));
+        assert_eq!(
+            SessionState::anchor_to_persist(&nested),
+            Some(repo.path().to_path_buf())
+        );
     }
 
     #[test]
@@ -567,8 +587,14 @@ mod tests {
         f.set_modified(old).unwrap();
 
         SessionState::cleanup_old_pointers(sessions.path());
-        assert!(!sessions.path().join("stale").exists(), "stale pointer should be reaped");
-        assert!(sessions.path().join("fresh").exists(), "fresh pointer must survive");
+        assert!(
+            !sessions.path().join("stale").exists(),
+            "stale pointer should be reaped"
+        );
+        assert!(
+            sessions.path().join("fresh").exists(),
+            "fresh pointer must survive"
+        );
     }
 
     #[test]
@@ -586,6 +612,10 @@ mod tests {
         let mut state = SessionState::new("terminated");
         state.mark_terminated("evasion detected: rev | sh");
         assert!(state.terminated);
-        assert!(state.termination_reason.as_deref().unwrap().contains("rev | sh"));
+        assert!(state
+            .termination_reason
+            .as_deref()
+            .unwrap()
+            .contains("rev | sh"));
     }
 }

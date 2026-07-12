@@ -5,8 +5,10 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::prelude::*;
 
 use crate::trace;
@@ -57,17 +59,19 @@ fn run_tui(session_id: &str, entries: Vec<crate::types::TraceEntry>) -> io::Resu
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? { match key.code {
-                KeyCode::Char('q') => break,
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
-                KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
-                KeyCode::Char('G') => app.jump_to_end(),
-                KeyCode::Char('g') => app.jump_to_start(),
-                KeyCode::Enter => app.toggle_detail(),
-                KeyCode::Char('?') => app.show_help = !app.show_help,
-                _ => {}
-            } }
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
+                    KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
+                    KeyCode::Char('G') => app.jump_to_end(),
+                    KeyCode::Char('g') => app.jump_to_start(),
+                    KeyCode::Enter => app.toggle_detail(),
+                    KeyCode::Char('?') => app.show_help = !app.show_help,
+                    _ => {}
+                }
+            }
         }
     }
 

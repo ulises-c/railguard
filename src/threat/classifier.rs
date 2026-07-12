@@ -9,7 +9,10 @@ pub enum ThreatTier {
     /// Warning on first occurrence, termination on second.
     Tier2 { pattern: String },
     /// Behavioral: retry of blocked command with different syntax.
-    Tier3 { original_rule: String, matched_keywords: Vec<String> },
+    Tier3 {
+        original_rule: String,
+        matched_keywords: Vec<String>,
+    },
 }
 
 /// Classify the threat tier of a command.
@@ -139,11 +142,9 @@ fn detect_tier2(cmd: &str) -> Option<String> {
 /// Filters out common shell tokens and returns actionable words.
 pub fn extract_keywords(cmd: &str) -> Vec<String> {
     let noise: std::collections::HashSet<&str> = [
-        "|", "&&", "||", ";", ">", ">>", "<", "2>&1",
-        "sh", "bash", "zsh", "echo", "eval", "exec", "source",
-        "sudo", "env", "export", "set", "unset",
-        "if", "then", "else", "fi", "for", "do", "done", "while",
-        "true", "false", "test", "xargs",
+        "|", "&&", "||", ";", ">", ">>", "<", "2>&1", "sh", "bash", "zsh", "echo", "eval", "exec",
+        "source", "sudo", "env", "export", "set", "unset", "if", "then", "else", "fi", "for", "do",
+        "done", "while", "true", "false", "test", "xargs",
     ]
     .iter()
     .copied()

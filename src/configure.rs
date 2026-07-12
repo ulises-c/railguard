@@ -41,7 +41,10 @@ pub fn run_configure() -> i32 {
             .items
             .iter()
             .map(|item| {
-                let action_label = if all_rules.iter().any(|r| r.name == item.rule_name && r.action == "approve") {
+                let action_label = if all_rules
+                    .iter()
+                    .any(|r| r.name == item.rule_name && r.action == "approve")
+                {
                     " (approve)".dimmed().to_string()
                 } else {
                     " (block)".dimmed().to_string()
@@ -146,7 +149,10 @@ pub fn run_configure() -> i32 {
             // Check if hooks are installed
             match crate::install::hooks::check_installed() {
                 Ok(true) => {
-                    println!("  {} Hooks already installed — config active on next run.", "✓".green().bold());
+                    println!(
+                        "  {} Hooks already installed — config active on next run.",
+                        "✓".green().bold()
+                    );
                 }
                 _ => {
                     println!(
@@ -414,7 +420,10 @@ fn generate_yaml(policy: &Policy) -> String {
         for rule in &policy.blocklist {
             yaml.push_str(&format!("  - name: {}\n", rule.name));
             yaml.push_str(&format!("    tool: {}\n", rule.tool));
-            yaml.push_str(&format!("    pattern: \"{}\"\n", escape_yaml_string(&rule.pattern)));
+            yaml.push_str(&format!(
+                "    pattern: \"{}\"\n",
+                escape_yaml_string(&rule.pattern)
+            ));
             yaml.push_str(&format!("    action: {}\n", rule.action));
             if let Some(msg) = &rule.message {
                 yaml.push_str(&format!("    message: \"{}\"\n", msg));
@@ -431,7 +440,10 @@ fn generate_yaml(policy: &Policy) -> String {
         for rule in &policy.approve {
             yaml.push_str(&format!("  - name: {}\n", rule.name));
             yaml.push_str(&format!("    tool: {}\n", rule.tool));
-            yaml.push_str(&format!("    pattern: \"{}\"\n", escape_yaml_string(&rule.pattern)));
+            yaml.push_str(&format!(
+                "    pattern: \"{}\"\n",
+                escape_yaml_string(&rule.pattern)
+            ));
             yaml.push_str(&format!("    action: {}\n", rule.action));
             if let Some(msg) = &rule.message {
                 yaml.push_str(&format!("    message: \"{}\"\n", msg));

@@ -32,11 +32,7 @@ pub fn check_conflicts(
         }
 
         // Skip MEMORY.md index
-        if entry
-            .file_name()
-            .map(|f| f == "MEMORY.md")
-            .unwrap_or(false)
-        {
+        if entry.file_name().map(|f| f == "MEMORY.md").unwrap_or(false) {
             continue;
         }
 
@@ -153,14 +149,13 @@ fn strip_frontmatter(content: &str) -> String {
 /// Tokenize text into lowercase words, filtering noise.
 fn tokenize(text: &str) -> Vec<String> {
     let stop_words: HashSet<&str> = [
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has",
-        "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall",
-        "can", "to", "of", "in", "for", "on", "with", "at", "by", "from", "as", "into",
-        "through", "during", "before", "after", "above", "below", "between", "out", "off", "over",
-        "under", "and", "but", "or", "nor", "not", "so", "yet", "both", "either", "neither",
-        "each", "every", "all", "any", "few", "more", "most", "other", "some", "such", "no",
-        "only", "own", "same", "than", "too", "very", "this", "that", "these", "those", "it",
-        "its",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+        "to", "of", "in", "for", "on", "with", "at", "by", "from", "as", "into", "through",
+        "during", "before", "after", "above", "below", "between", "out", "off", "over", "under",
+        "and", "but", "or", "nor", "not", "so", "yet", "both", "either", "neither", "each",
+        "every", "all", "any", "few", "more", "most", "other", "some", "such", "no", "only", "own",
+        "same", "than", "too", "very", "this", "that", "these", "those", "it", "its",
     ]
     .into_iter()
     .collect();

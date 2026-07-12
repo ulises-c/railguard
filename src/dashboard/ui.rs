@@ -1,5 +1,7 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, BorderType, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+};
 
 use super::app::{App, Filter, Mode};
 
@@ -18,14 +20,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let constraints = if has_search_bar {
         vec![
             Constraint::Length(1), // header
-            Constraint::Min(5),   // feed
+            Constraint::Min(5),    // feed
             Constraint::Length(1), // search bar
             Constraint::Length(1), // status bar
         ]
     } else {
         vec![
             Constraint::Length(1), // header
-            Constraint::Min(5),   // feed
+            Constraint::Min(5),    // feed
             Constraint::Length(1), // status bar
         ]
     };
@@ -128,11 +130,14 @@ fn draw_feed(f: &mut Frame, app: &mut App, area: Rect) {
             _ => "???    ",
         };
 
-        let tool_display = format!("{:<6}", if entry.tool.len() > 6 {
-            &entry.tool[..6]
-        } else {
-            &entry.tool
-        });
+        let tool_display = format!(
+            "{:<6}",
+            if entry.tool.len() > 6 {
+                &entry.tool[..6]
+            } else {
+                &entry.tool
+            }
+        );
 
         // Session tag (last 4 chars)
         let session_tag = if show_session {
@@ -145,7 +150,10 @@ fn draw_feed(f: &mut Frame, app: &mut App, area: Rect) {
         let overhead = 30 + session_tag.len();
         let max_input_len = (inner.width as usize).saturating_sub(overhead);
         let input = if entry.input_summary.len() > max_input_len {
-            format!("{}...", &entry.input_summary[..max_input_len.saturating_sub(3)])
+            format!(
+                "{}...",
+                &entry.input_summary[..max_input_len.saturating_sub(3)]
+            )
         } else {
             entry.input_summary.clone()
         };
@@ -153,14 +161,24 @@ fn draw_feed(f: &mut Frame, app: &mut App, area: Rect) {
         let time = extract_time(&entry.timestamp);
 
         let rule_suffix = if entry.decision == "block" {
-            entry.rule.as_deref().map(|r| format!(" \u{2500} {}", r)).unwrap_or_default()
+            entry
+                .rule
+                .as_deref()
+                .map(|r| format!(" \u{2500} {}", r))
+                .unwrap_or_default()
         } else {
             String::new()
         };
 
         let mut spans = vec![
-            Span::styled(format!("  {} ", icon), Style::default().fg(icon_color).bold()),
-            Span::styled(format!("{} ", decision_label), Style::default().fg(icon_color)),
+            Span::styled(
+                format!("  {} ", icon),
+                Style::default().fg(icon_color).bold(),
+            ),
+            Span::styled(
+                format!("{} ", decision_label),
+                Style::default().fg(icon_color),
+            ),
         ];
 
         if show_session {
@@ -170,10 +188,16 @@ fn draw_feed(f: &mut Frame, app: &mut App, area: Rect) {
             ));
         }
 
-        spans.push(Span::styled(format!("{} ", tool_display), Style::default().fg(CYAN)));
+        spans.push(Span::styled(
+            format!("{} ", tool_display),
+            Style::default().fg(CYAN),
+        ));
         spans.push(Span::styled(input, Style::default().fg(TEXT)));
         spans.push(Span::styled(rule_suffix, Style::default().fg(DIM)));
-        spans.push(Span::styled(format!("  {}", time), Style::default().fg(DIM)));
+        spans.push(Span::styled(
+            format!("  {}", time),
+            Style::default().fg(DIM),
+        ));
 
         let line = Line::from(spans);
         items.push(ListItem::new(line));
@@ -187,8 +211,7 @@ fn draw_feed(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let list = List::new(items)
-        .highlight_style(Style::default().bg(Color::Rgb(30, 30, 40)));
+    let list = List::new(items).highlight_style(Style::default().bg(Color::Rgb(30, 30, 40)));
     let mut list_state = ListState::default();
     list_state.select(Some(app.selected));
 
@@ -288,9 +311,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         "normal".to_string()
     };
 
-    let is_terminated = app
-        .worst_threat_state()
-        .is_some_and(|s| s.terminated);
+    let is_terminated = app.worst_threat_state().is_some_and(|s| s.terminated);
 
     let bar_style = if is_terminated {
         Style::default().bg(Color::Red).fg(TEXT).bold()
@@ -336,7 +357,12 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
     let help_height = 16u16;
     let x = area.width.saturating_sub(help_width) / 2;
     let y = area.height.saturating_sub(help_height) / 2;
-    let help_area = Rect::new(x, y, help_width.min(area.width), help_height.min(area.height));
+    let help_area = Rect::new(
+        x,
+        y,
+        help_width.min(area.width),
+        help_height.min(area.height),
+    );
 
     f.render_widget(Clear, help_area);
 

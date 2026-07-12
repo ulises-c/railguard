@@ -361,7 +361,11 @@ mod tests {
     #[test]
     fn test_all_rules_have_messages() {
         for rule in &default_blocklist() {
-            assert!(rule.message.is_some(), "Rule '{}' missing message", rule.name);
+            assert!(
+                rule.message.is_some(),
+                "Rule '{}' missing message",
+                rule.name
+            );
         }
     }
 
@@ -381,7 +385,13 @@ mod tests {
     #[test]
     fn test_destructive_commands_are_block() {
         let rules = default_blocklist();
-        let block_rules = ["terraform-destroy", "rm-rf-critical", "sql-drop", "git-force-push", "git-reset-hard"];
+        let block_rules = [
+            "terraform-destroy",
+            "rm-rf-critical",
+            "sql-drop",
+            "git-force-push",
+            "git-reset-hard",
+        ];
         for name in &block_rules {
             let rule = rules.iter().find(|r| r.name == *name).unwrap();
             assert_eq!(rule.action, "block", "Rule '{}' should be block", name);
@@ -391,7 +401,12 @@ mod tests {
     #[test]
     fn test_evasion_rules_are_block() {
         let rules = default_blocklist();
-        let block_rules = ["base64-to-shell", "transform-pipe-to-shell", "interpreter-obfuscation", "printf-hex-exec"];
+        let block_rules = [
+            "base64-to-shell",
+            "transform-pipe-to-shell",
+            "interpreter-obfuscation",
+            "printf-hex-exec",
+        ];
         for name in &block_rules {
             let rule = rules.iter().find(|r| r.name == *name).unwrap();
             assert_eq!(rule.action, "block", "Rule '{}' should be block", name);

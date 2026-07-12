@@ -41,9 +41,14 @@ pub fn generate_profile(config: &FenceConfig, cwd: &str) -> String {
     // Allow read-only system paths
     profile.push_str(";; Read-only system paths\n");
     for sys_path in &[
-        "/usr", "/bin", "/sbin", "/opt/homebrew",
-        "/Library/Frameworks", "/System",
-        "/private/var/db", "/private/etc",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/opt/homebrew",
+        "/Library/Frameworks",
+        "/System",
+        "/private/var/db",
+        "/private/etc",
     ] {
         profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", sys_path));
     }
@@ -146,7 +151,6 @@ fn expand_path(path: &str, home: &str) -> String {
         path.to_string()
     }
 }
-
 
 /// Generate the sandbox-exec command to wrap a given command.
 pub fn wrap_command(profile_path: &str, command: &str) -> String {

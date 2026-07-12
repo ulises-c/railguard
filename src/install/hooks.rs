@@ -41,18 +41,13 @@ pub fn enable_bypass_permissions() -> Result<String, String> {
         .as_object_mut()
         .ok_or("Settings is not a JSON object")?;
 
-    let permissions = root
-        .entry("permissions")
-        .or_insert_with(|| json!({}));
+    let permissions = root.entry("permissions").or_insert_with(|| json!({}));
 
     let perms_obj = permissions
         .as_object_mut()
         .ok_or("permissions is not a JSON object")?;
 
-    perms_obj.insert(
-        "defaultMode".to_string(),
-        json!("bypassPermissions"),
-    );
+    perms_obj.insert("defaultMode".to_string(), json!("bypassPermissions"));
 
     write_settings(&settings_path, &settings)?;
 
@@ -99,9 +94,7 @@ pub fn install_hooks() -> Result<String, String> {
         .entry("hooks")
         .or_insert_with(|| json!({}));
 
-    let hooks_obj = hooks
-        .as_object_mut()
-        .ok_or("hooks is not a JSON object")?;
+    let hooks_obj = hooks.as_object_mut().ok_or("hooks is not a JSON object")?;
 
     // PreToolUse hook — blocks/approves/traces before execution
     let pre_hook = json!([{
@@ -148,10 +141,7 @@ pub fn install_hooks() -> Result<String, String> {
             .or_insert_with(|| json!({}));
 
         if let Some(env_map) = env_obj.as_object_mut() {
-            env_map.insert(
-                "CLAUDE_CODE_SHELL".to_string(),
-                json!(shell_binary),
-            );
+            env_map.insert("CLAUDE_CODE_SHELL".to_string(), json!(shell_binary));
         }
     }
 
@@ -186,10 +176,7 @@ fn upsert_railguard_section(existing: &str, marked_content: &str) -> String {
             .next()
             .unwrap_or("")
             .trim_end();
-        let after = existing
-            .split(CLAUDE_MD_MARKER_END)
-            .nth(1)
-            .unwrap_or("");
+        let after = existing.split(CLAUDE_MD_MARKER_END).nth(1).unwrap_or("");
         let separator = if before.is_empty() { "" } else { "\n\n" };
         let updated = format!("{}{}{}{}", before, separator, marked_content, after);
         return updated.trim().to_string() + "\n";
@@ -269,9 +256,11 @@ pub fn uninstall_hooks() -> Result<String, String> {
     // Check if running interactively (a TTY is attached)
     // Agents pipe stdin, so this catches most automated attempts
     if !is_interactive_terminal() {
-        return Err("Railguard can only be uninstalled from an interactive terminal.\n  \
+        return Err(
+            "Railguard can only be uninstalled from an interactive terminal.\n  \
                     This prevents AI agents from removing their own guardrails."
-            .to_string());
+                .to_string(),
+        );
     }
 
     // Show native OS confirmation dialog — requires a real human to click through
@@ -508,8 +497,7 @@ fn read_settings(path: &Path) -> Result<Value, String> {
 
 fn write_settings(path: &Path, settings: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create settings dir: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create settings dir: {}", e))?;
     }
 
     let content = serde_json::to_string_pretty(settings)
