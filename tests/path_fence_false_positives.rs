@@ -7,9 +7,10 @@
 //!
 //! Every command below is benign — it reads/inspects, navigates, or merely
 //! *mentions* path-shaped text (sed/awk regex addresses, jq operators, URLs,
-//! arithmetic) — and must NOT be stopped by the path fence. None of them
-//! reference a denied path (`~/.ssh`, `/etc`, ...), which is a separate
-//! concern: denied paths are blocked regardless and are out of scope here.
+//! arithmetic, paths quoted inside commit messages or heredoc prose) — and
+//! must NOT be stopped by the path fence. None of them *accesses* a denied
+//! path (`~/.ssh`, `/etc`, ...); a few mention one inside message data, which
+//! is exactly the false positive of issue #17.
 //!
 //! The command runs with cwd == the policy/project dir, so any path the fence
 //! flags is necessarily a spurious "outside project" extraction.
@@ -124,6 +125,19 @@ const BENIGN: &[(&str, &str)] = &[
     ("piped read-only with jq", r#"cat data.json | jq '.x // empty' | sort"#),
     ("pushd grep popd", r#"pushd src && grep -rn '/v1/' . && popd"#),
     ("cd chain to awk", r#"cd src && awk -F/ '{print $2}' paths.txt"#),
+    // ── issue #17: path-shaped text in data positions (never accessed) ──
+    ("sed conflict markers", r#"sed -n '/<<<<<<< /,/>>>>>>> /p' file.rs"#),
+    ("file url with variable", r#"curl -s file://$PWD/fixtures/data.json"#),
+    (
+        "commit msg mentions path",
+        r#"git commit -m "docs: update ~/.claude/docs/RAILGUARD.md notes""#,
+    ),
+    ("commit msg slash token", r#"git commit -m "ran /verify and it passed""#),
+    ("commit msg bare path", r#"git commit -m "~/.claude/docs/RAILGUARD.md""#),
+    (
+        "heredoc doc text",
+        "cat <<EOF\nSee /verify and ~/.claude/docs for details\nEOF",
+    ),
 ];
 
 #[test]
@@ -163,6 +177,11 @@ const WRITE_CAPABLE_OUTSIDE: &[(&str, &str)] = &[
     ("cargo manifest outside", r#"cargo build --manifest-path ~/other/Cargo.toml"#),
     ("npm prefix outside", r#"npm install --prefix ~/other/pkg"#),
     ("ruby outside script", r#"ruby ~/scratch/gen.rb"#),
+    // issue #17: executable payloads and operands must still be fenced even
+    // though word-level extraction skips quoted message data
+    ("bash -c naming outside", r#"bash -c "touch ~/outside/x""#),
+    ("cp to outside", r#"cp notes.txt ~/outside/x"#),
+    ("redirect to outside", r#"echo x > ~/outside/x"#),
 ];
 
 #[test]
