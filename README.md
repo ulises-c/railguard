@@ -138,4 +138,4 @@ Drop [`templates/AGENTS.md`](templates/AGENTS.md) into your project to tell your
 
 [Join the Discord](https://discord.gg/MyaUZSus)
 
-MIT License.
+MIT License. This project is an independent continuation of an earlier work — see [`ATTRIBUTION.md`](ATTRIBUTION.md) for its origin and license lineage.
