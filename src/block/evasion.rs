@@ -16,6 +16,15 @@ use std::sync::LazyLock;
 static ASSIGN_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r#"(\w+)=["']?([^"';\s&|]+)["']?"#).unwrap());
 
+/// Any path-shaped substring, preceded by start/whitespace/quote/`=`. Used only
+/// inside recursed executable payloads (interpreter code, `eval`, command
+/// substitutions, shell heredocs), where a path can be glued to code
+/// punctuation (`open("/etc/x")`, `['cat','/etc/x']`) and no top-level shell
+/// word-splitting applies. Not used at the shell command line — that's where
+/// the issue #17 data-vs-operand false positives live.
+static PATH_SUBSTR_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r#"(?:^|[\s"'=(\[,])((?:/|~/|\.\./)[\w./_-]+)"#).unwrap());
+
 /// Normalize a command string for pattern matching.
 /// Returns a vec of strings to match against (original + decoded variants).
 pub fn normalize_command(cmd: &str) -> Vec<String> {
@@ -394,6 +403,27 @@ fn extract_paths_inner(cmd: &str, depth: usize, paths: &mut Vec<String>) {
     if expanded_cmd != cmd {
         collect_paths_from_text(cmd, depth, paths);
     }
+
+    // Recursed payloads are executable code, not a shell command line: a path
+    // may be glued to code punctuation that word-splitting can't isolate, so
+    // fall back to substring scanning to restore the flat-regex coverage.
+    if depth > 0 {
+        scan_path_substrings(&expanded_cmd, paths);
+        if expanded_cmd != cmd {
+            scan_path_substrings(cmd, paths);
+        }
+    }
+}
+
+fn scan_path_substrings(text: &str, paths: &mut Vec<String>) {
+    for caps in PATH_SUBSTR_RE.captures_iter(text) {
+        if let Some(m) = caps.get(1) {
+            let p = m.as_str().to_string();
+            if has_path_component(&p) && !is_benign_path(&p) && !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+    }
 }
 
 /// Tokenize one command text and collect path candidates, splitting into
@@ -544,14 +574,16 @@ fn is_wrapper(cmd: &str) -> bool {
     )
 }
 
-/// A flag that introduces inline code for a shell/interpreter: `-c`, `-e`,
-/// `--eval`, or a combined single-dash cluster containing `c`/`e` (`-cx`, `-ec`).
+/// A flag that introduces inline code for a shell/interpreter: `--eval`, or a
+/// single-dash cluster containing a code letter — `c` (sh/python), `e`/`E`
+/// (perl/ruby/node), `n`/`p` (perl/node autoloop) — so `-c`, `-E`, `-cx`, `-ne`
+/// all match. Only consulted when the effective command is an interpreter.
 fn is_code_flag(w: &str) -> bool {
-    matches!(w, "-c" | "-e" | "--eval")
-        || (w.len() > 2
+    w == "--eval"
+        || (w.len() >= 2
             && w.starts_with('-')
             && !w.starts_with("--")
-            && (w.contains('c') || w.contains('e')))
+            && w[1..].chars().any(|c| matches!(c, 'c' | 'e' | 'E' | 'n' | 'p')))
 }
 
 fn push_candidate(word: &str, paths: &mut Vec<String>) {
@@ -880,6 +912,14 @@ fn tokenize_shell(text: &str) -> TokenizedCommand {
             '`' => {
                 lex.push_op("`", true);
                 i += 1;
+            }
+            // `#` starts a comment only at a word boundary (a bare `#`), not
+            // mid-word (`a#b` is literal); skip the rest of the line so paths
+            // mentioned in a trailing comment aren't read as operands.
+            '#' if !lex.has_word => {
+                while i < len && chars[i] != '\n' {
+                    i += 1;
+                }
             }
             c => {
                 lex.push_char(c);
@@ -1382,5 +1422,33 @@ mod tests {
         // Leading-prefix extraction must not resurrect the mid-prose FP.
         assert!(extract_paths_from_command(r#"echo "the file /etc/passwd is famous""#)
             .is_empty());
+    }
+
+    #[test]
+    fn test_interpreter_payload_glued_path_scanned() {
+        // A path glued to code punctuation isn't a standalone shell word, so the
+        // recursed-payload substring scan must catch it.
+        assert!(extract_paths_from_command(r#"perl -e 'open(F,"/etc/shadow")'"#)
+            .contains(&"/etc/shadow".to_string()));
+        assert!(
+            extract_paths_from_command(r#"python3 -c "subprocess.run(['cat','/etc/shadow'])""#)
+                .contains(&"/etc/shadow".to_string())
+        );
+    }
+
+    #[test]
+    fn test_uppercase_and_autoloop_code_flags_scanned() {
+        assert!(extract_paths_from_command(r#"perl -E 'open("/etc/passwd")'"#)
+            .contains(&"/etc/passwd".to_string()));
+        assert!(extract_paths_from_command(r#"perl -ne 'print if -e "/etc/hosts"'"#)
+            .contains(&"/etc/hosts".to_string()));
+    }
+
+    #[test]
+    fn test_trailing_comment_path_not_extracted() {
+        assert!(extract_paths_from_command("make build # writes to /etc/hosts").is_empty());
+        // A mid-word '#' is literal, not a comment.
+        assert!(extract_paths_from_command("cat /etc/pass#wd")
+            .contains(&"/etc/pass".to_string()));
     }
 }
