@@ -78,7 +78,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             state.suspicion_level = 0;
             state.warning_count = 0;
             state.block_history.clear();
-            state.heightened_keywords.clear();
+            state.heightened_until_call = None;
             let _ = state.save(&state_dir);
             // Fall through to normal evaluation
         } else {

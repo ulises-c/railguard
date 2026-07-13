@@ -328,12 +328,11 @@ pub fn is_transform_pipe_to_shell(cmd: &str) -> bool {
 /// P0 Fix: Detect interpreter + obfuscation combos.
 /// Catches: python3 -c "...base64.b64decode..." or "...chr(..." etc.
 /// The combination of an interpreter with string manipulation is suspicious.
-/// Genuine obfuscation — encoding, character assembly, dynamic execution of
-/// constructed code, or path assembly. Sufficient in *any* interpreter payload,
-/// inline or heredoc script.
-static OBFUSCATION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
-    [
-        // Encoding / decoding
+/// Strong obfuscation — encoding/decoding and dynamic execution of constructed
+/// code. These have no place in readable code, so they flag in *any* interpreter
+/// payload, inline one-liner or multi-line heredoc script.
+static STRONG_OBFUSCATION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+    compile_signals(&[
         r"b64decode",
         r"b64encode",
         r"base64\s*\.\s*\w*decode",
@@ -341,39 +340,46 @@ static OBFUSCATION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
         r"fromhex",
         r"unhexlify",
         r"atob\s*\(",
-        // Character assembly
-        r"chr\s*\(",
-        r"fromCharCode",
-        r"\\x[0-9a-fA-F]{2}",
-        // Dynamic execution of constructed code
         r"eval\s*\(",
         r"exec\s*\(",
         r"compile\s*\(",
-        // Path assembly via join — '/'.join or "/".join
-        r#"['"]/'*\s*\.\s*join\s*\("#,
-    ]
-    .iter()
-    .map(|p| regex::Regex::new(p).unwrap())
-    .collect()
+    ])
 });
 
-/// Command-execution primitives. A payload doing this is only treated as
-/// obfuscation when it is an inline one-liner (`-c`/`-e`/`<<<`/`eval`): that is
-/// the classic bypass shape. Multi-line heredoc scripts use subprocess
-/// legitimately all the time, so execution alone doesn't flag them.
+/// Weak obfuscation — character assembly, hex escapes, path assembly. Readable
+/// scripts use these legitimately (ANSI stripping, byte handling, path joins),
+/// so they only flag in a terse inline one-liner, where they are far more
+/// suspicious than in a multi-line heredoc script (issue #18).
+static INLINE_OBFUSCATION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+    compile_signals(&[
+        r"chr\s*\(",
+        r"fromCharCode",
+        r"\\x[0-9a-fA-F]{2}",
+        // Path assembly via join — '/'.join or "/".join
+        r#"['"]/'*\s*\.\s*join\s*\("#,
+    ])
+});
+
+/// Command-execution primitives. Only treated as obfuscation in an inline
+/// one-liner (`-c`/`-e`/`<<<`/`eval`) — the classic bypass shape. Multi-line
+/// heredoc scripts use subprocess legitimately all the time.
 static EXECUTION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
-    [
+    compile_signals(&[
         r"os\.system",
         r"os\.popen",
         r"system\s*\(",
         r"Popen\s*\(",
         r"subprocess",
         r"child_process",
-    ]
-    .iter()
-    .map(|p| regex::Regex::new(p).unwrap())
-    .collect()
+    ])
 });
+
+fn compile_signals(patterns: &[&str]) -> Vec<regex::Regex> {
+    patterns
+        .iter()
+        .map(|p| regex::Regex::new(p).unwrap())
+        .collect()
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum PayloadKind {
@@ -390,10 +396,18 @@ enum PayloadKind {
 /// prose that merely mentions an interpreter (issue #18).
 pub fn is_interpreter_obfuscation(cmd: &str) -> bool {
     for (kind, payload) in interpreter_code_payloads(cmd) {
-        if OBFUSCATION_SIGNALS.iter().any(|re| re.is_match(&payload)) {
+        if STRONG_OBFUSCATION_SIGNALS
+            .iter()
+            .any(|re| re.is_match(&payload))
+        {
             return true;
         }
-        if kind == PayloadKind::Inline && EXECUTION_SIGNALS.iter().any(|re| re.is_match(&payload)) {
+        if kind == PayloadKind::Inline
+            && (INLINE_OBFUSCATION_SIGNALS
+                .iter()
+                .any(|re| re.is_match(&payload))
+                || EXECUTION_SIGNALS.iter().any(|re| re.is_match(&payload)))
+        {
             return true;
         }
     }
@@ -405,28 +419,35 @@ pub fn is_interpreter_obfuscation(cmd: &str) -> bool {
 /// stay consistent (issue #27): only segments whose effective command is a
 /// shell/interpreter contribute a payload.
 fn interpreter_code_payloads(cmd: &str) -> Vec<(PayloadKind, String)> {
-    let parsed = tokenize_shell(cmd);
     let mut payloads = Vec::new();
+    collect_interpreter_payloads(cmd, 0, &mut payloads);
+    payloads
+}
 
-    let mut segment: Vec<&ShellToken> = Vec::new();
-    for tok in &parsed.tokens {
-        if let ShellToken::Op(op) = tok {
-            if matches!(*op, "&&" | "||" | ";" | "|" | "&" | "(" | ")" | "`") {
-                collect_payloads_from_segment(&segment, &mut payloads);
-                segment.clear();
-                continue;
-            }
-        }
-        segment.push(tok);
+fn collect_interpreter_payloads(
+    cmd: &str,
+    depth: usize,
+    payloads: &mut Vec<(PayloadKind, String)>,
+) {
+    if depth > MAX_EXTRACT_DEPTH {
+        return;
     }
-    collect_payloads_from_segment(&segment, &mut payloads);
+    let parsed = tokenize_shell(cmd);
 
+    for_each_segment(&parsed.tokens, |segment| {
+        collect_payloads_from_segment(segment, payloads);
+    });
+
+    // Obfuscation hidden in a command substitution feeding another command is
+    // still executable code; recurse it as the path extractor does.
+    for sub in &parsed.substitutions {
+        collect_interpreter_payloads(sub, depth + 1, payloads);
+    }
     for heredoc in &parsed.heredocs {
         if is_shell_or_interpreter(&heredoc.consumer) {
             payloads.push((PayloadKind::Script, heredoc.body.clone()));
         }
     }
-    payloads
 }
 
 fn collect_payloads_from_segment(
@@ -452,26 +473,51 @@ fn collect_payloads_from_segment(
         return;
     }
 
+    // Once the interpreter's program is defined (a script file operand or a
+    // `-c`/`-e` code arg), stdin (`<<<`/heredoc) is data the program reads, not
+    // code — so a here-string only counts as code before that point.
+    let mut program_defined = false;
     let mut pending = false;
     let mut word_no = 0usize;
     for tok in tokens {
         match tok {
-            ShellToken::Op("<<<") => pending = true,
+            ShellToken::Op("<<<") if !program_defined => pending = true,
             ShellToken::Op(_) => {}
             ShellToken::Word(w) => {
                 if std::mem::take(&mut pending) {
                     payloads.push((PayloadKind::Inline, w.to_string()));
+                    program_defined = true;
                 } else if word_no > eff_idx {
                     if eff == "eval" {
                         payloads.push((PayloadKind::Inline, w.to_string()));
-                    } else if is_code_flag(w) {
+                    } else if is_inline_code_flag(eff, w) {
                         pending = true;
+                    } else if !w.starts_with('-') {
+                        program_defined = true;
                     }
                 }
                 word_no += 1;
             }
         }
     }
+}
+
+/// Split a token stream into pipeline/list segments on shell operators, calling
+/// `f` with each segment. Shared by path and payload extraction so the two
+/// never disagree on where a command begins.
+fn for_each_segment<F: FnMut(&[&ShellToken])>(tokens: &[ShellToken], mut f: F) {
+    let mut segment: Vec<&ShellToken> = Vec::new();
+    for tok in tokens {
+        if let ShellToken::Op(op) = tok {
+            if matches!(*op, "&&" | "||" | ";" | "|" | "&" | "(" | ")" | "`") {
+                f(&segment);
+                segment.clear();
+                continue;
+            }
+        }
+        segment.push(tok);
+    }
+    f(&segment);
 }
 
 /// Extract all file paths from a command, resolving variable assignments.
@@ -550,18 +596,9 @@ fn scan_path_substrings(text: &str, paths: &mut Vec<String>) {
 fn collect_paths_from_text(text: &str, depth: usize, paths: &mut Vec<String>) {
     let parsed = tokenize_shell(text);
 
-    let mut segment: Vec<&ShellToken> = Vec::new();
-    for tok in &parsed.tokens {
-        if let ShellToken::Op(op) = tok {
-            if matches!(*op, "&&" | "||" | ";" | "|" | "&" | "(" | ")" | "`") {
-                collect_paths_from_segment(&segment, depth, paths);
-                segment.clear();
-                continue;
-            }
-        }
-        segment.push(tok);
-    }
-    collect_paths_from_segment(&segment, depth, paths);
+    for_each_segment(&parsed.tokens, |segment| {
+        collect_paths_from_segment(segment, depth, paths);
+    });
 
     for sub in &parsed.substitutions {
         extract_paths_inner(sub, depth + 1, paths);
@@ -706,6 +743,27 @@ fn is_code_flag(w: &str) -> bool {
             && w[1..]
                 .chars()
                 .any(|c| matches!(c, 'c' | 'e' | 'E' | 'n' | 'p')))
+}
+
+/// Whether `w` is a flag that introduces an *inline code argument* for the
+/// interpreter `eff`. Unlike `is_code_flag` (used by path extraction, where
+/// over-recursion is harmless), this must be precise: a flag that takes no code
+/// (`-n`/`-p` autoloop, python's `-E` ignore-env) would otherwise swallow the
+/// following script filename as a bogus payload (issue #18). In a getopt short
+/// cluster the last letter is the one that consumes the next word, and only
+/// `-c`/`-e`/`-E` introduce code — and `-e`/`-E` never do so for python.
+fn is_inline_code_flag(eff: &str, w: &str) -> bool {
+    if w == "--eval" {
+        return true;
+    }
+    if w.len() < 2 || !w.starts_with('-') || w.starts_with("--") {
+        return false;
+    }
+    match w.chars().last() {
+        Some('c') => true,
+        Some('e') | Some('E') => !eff.starts_with("python"),
+        _ => false,
+    }
 }
 
 fn push_candidate(word: &str, paths: &mut Vec<String>) {
@@ -1345,6 +1403,52 @@ mod tests {
         // join has no path-assembly quote-slash signal.
         assert!(!is_interpreter_obfuscation(
             r#"python3 -c "open('out.txt','w').write('\n'.join(['a','b']))""#
+        ));
+    }
+
+    #[test]
+    fn test_autoloop_flag_does_not_capture_filename() {
+        // `-n`/`-p` take no inline code, so the following script filename must
+        // not be scanned as a payload — even if its name contains a signal word.
+        assert!(!is_interpreter_obfuscation("sh -n deploy_subprocess.sh"));
+        assert!(!is_interpreter_obfuscation("perl -n audit_system.pl"));
+    }
+
+    #[test]
+    fn test_python_ignore_env_flag_before_code_flag() {
+        // `python3 -E -c "<obf>"`: -E (ignore-env, no code) must not swallow -c;
+        // the real -c payload still gets scanned.
+        assert!(is_interpreter_obfuscation(
+            r#"python3 -E -c "import base64,os; os.system(base64.b64decode('x').decode())""#
+        ));
+    }
+
+    #[test]
+    fn test_heredoc_benign_hex_escape_not_flagged() {
+        // A heredoc script stripping ANSI escapes uses \x1b legitimately; hex
+        // escapes are weak signals that must not flag a multi-line script.
+        let cmd = "python3 - <<'PY'\n\
+                   text = open('log.txt').read()\n\
+                   clean = text.replace('\\x1b[0m', '')\n\
+                   open('log.txt', 'w').write(clean)\n\
+                   PY";
+        assert!(!is_interpreter_obfuscation(cmd));
+    }
+
+    #[test]
+    fn test_obfuscation_in_command_substitution_flagged() {
+        // Obfuscation hidden in a $(...) feeding another command is still code.
+        assert!(is_interpreter_obfuscation(
+            r#"echo "$(python3 -c 'import base64,os; os.system(base64.b64decode("eA==").decode())')""#
+        ));
+    }
+
+    #[test]
+    fn test_herestring_data_to_script_file_not_flagged() {
+        // When the interpreter runs a script FILE, a here-string is stdin data
+        // the script reads, not code — a signal word in it must not flag.
+        assert!(!is_interpreter_obfuscation(
+            "python3 app.py <<< 'note: see the b64decode helper'"
         ));
     }
 

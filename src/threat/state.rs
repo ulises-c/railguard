@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// How many subsequent tool calls a denial keeps watching for an altered retry.
+const RETRY_WINDOW_CALLS: u64 = 3;
+
 /// Persistent session state for threat detection.
 /// Stored at `.railguard/state/{session_id}.json`.
 /// Each hook invocation loads, modifies, and saves this state.
@@ -14,8 +17,6 @@ pub struct SessionState {
     pub block_history: Vec<BlockEvent>,
     /// Tool call count at which heightened mode expires
     pub heightened_until_call: Option<u64>,
-    /// Keywords to watch for during heightened state
-    pub heightened_keywords: Vec<String>,
     /// Threat patterns the user has approved for this session.
     /// Once approved, the same pattern won't prompt again.
     #[serde(default)]
@@ -78,7 +79,6 @@ impl SessionState {
             warning_count: 0,
             block_history: Vec::new(),
             heightened_until_call: None,
-            heightened_keywords: Vec::new(),
             session_approvals: Vec::new(),
             pending_approval: None,
             project_root: None,
@@ -260,14 +260,13 @@ impl SessionState {
             tool_call_count: self.tool_call_count,
             command: command.chars().take(500).collect(),
             rule: rule.to_string(),
-            keywords: keywords.clone(),
+            keywords,
             tier,
             denied: true,
         });
 
-        // Enter heightened state: watch for keywords in next 3 tool calls
-        self.heightened_until_call = Some(self.tool_call_count + 3);
-        self.heightened_keywords = keywords;
+        // Enter heightened state: watch for retries over the next few calls.
+        self.heightened_until_call = Some(self.tool_call_count + RETRY_WINDOW_CALLS);
     }
 
     /// Record an approval prompt. Kept in history for audit, but an ask is not
@@ -285,11 +284,17 @@ impl SessionState {
         });
     }
 
-    /// Denied commands still inside the retry-watch window.
+    /// Denied commands still inside the retry-watch window, newest first.
+    /// `block_history` is append-only in ascending `tool_call_count`, so once a
+    /// scanned-from-the-end entry falls outside the window every earlier one
+    /// does too — stop there instead of scanning the whole (unbounded) history.
     pub fn recent_denied_blocks(&self) -> impl Iterator<Item = &BlockEvent> {
+        let cutoff = self.tool_call_count;
         self.block_history
             .iter()
-            .filter(|b| b.denied && self.tool_call_count <= b.tool_call_count + 3)
+            .rev()
+            .take_while(move |b| cutoff <= b.tool_call_count + RETRY_WINDOW_CALLS)
+            .filter(|b| b.denied)
     }
 
     pub fn record_warning(&mut self) {
