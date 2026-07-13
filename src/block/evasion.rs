@@ -328,53 +328,150 @@ pub fn is_transform_pipe_to_shell(cmd: &str) -> bool {
 /// P0 Fix: Detect interpreter + obfuscation combos.
 /// Catches: python3 -c "...base64.b64decode..." or "...chr(..." etc.
 /// The combination of an interpreter with string manipulation is suspicious.
-pub fn is_interpreter_obfuscation(cmd: &str) -> bool {
-    // Check if command invokes an interpreter with inline code
-    let interpreter_re = regex::Regex::new(r"(?:python3?|ruby|perl|node)\s+(?:-[ec]\s+|-e\s+)");
-    let has_interpreter = match &interpreter_re {
-        Ok(re) => re.is_match(cmd),
-        Err(_) => false,
-    };
-
-    if !has_interpreter {
-        return false;
-    }
-
-    // Check for obfuscation patterns in the inline code
-    let obfuscation_patterns = [
+/// Genuine obfuscation — encoding, character assembly, dynamic execution of
+/// constructed code, or path assembly. Sufficient in *any* interpreter payload,
+/// inline or heredoc script.
+static OBFUSCATION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+    [
         // Encoding / decoding
         r"b64decode",
         r"b64encode",
-        r"base64\..*decode",
-        // Character construction
+        r"base64\s*\.\s*\w*decode",
+        r"codecs\s*\.\s*decode",
+        r"fromhex",
+        r"unhexlify",
+        r"atob\s*\(",
+        // Character assembly
         r"chr\s*\(",
-        r"\\x[0-9a-fA-F]{2}",
         r"fromCharCode",
-        r"String\.fromCharCode",
-        // Code execution
+        r"\\x[0-9a-fA-F]{2}",
+        // Dynamic execution of constructed code
         r"eval\s*\(",
         r"exec\s*\(",
-        r"system\s*\(",
-        r"os\.system\s*\(",
-        r"os\.popen\s*\(",
-        r"subprocess",
-        r"Popen\s*\(",
-        // P0 R3: Path construction via join — '/'.join or "/".join
+        r"compile\s*\(",
+        // Path assembly via join — '/'.join or "/".join
         r#"['"]/'*\s*\.\s*join\s*\("#,
-        // P0 R3: open() with constructed path (join/chr)
-        r"open\s*\(.*\.join\s*\(",
-        r"open\s*\(.*chr\s*\(",
-    ];
+    ]
+    .iter()
+    .map(|p| regex::Regex::new(p).unwrap())
+    .collect()
+});
 
-    for pattern in &obfuscation_patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            if re.is_match(cmd) {
-                return true;
+/// Command-execution primitives. A payload doing this is only treated as
+/// obfuscation when it is an inline one-liner (`-c`/`-e`/`<<<`/`eval`): that is
+/// the classic bypass shape. Multi-line heredoc scripts use subprocess
+/// legitimately all the time, so execution alone doesn't flag them.
+static EXECUTION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+    [
+        r"os\.system",
+        r"os\.popen",
+        r"system\s*\(",
+        r"Popen\s*\(",
+        r"subprocess",
+        r"child_process",
+    ]
+    .iter()
+    .map(|p| regex::Regex::new(p).unwrap())
+    .collect()
+});
+
+#[derive(Clone, Copy, PartialEq)]
+enum PayloadKind {
+    /// Inline one-liner: `-c`/`-e` arg, `<<<` here-string, `eval` arg.
+    Inline,
+    /// Multi-line script fed on stdin via a heredoc.
+    Script,
+}
+
+/// True when an interpreter in `cmd` is fed a code payload carrying genuine
+/// obfuscation signals. Signals are matched only inside the executable payload
+/// (the interpreter's `-c`/`-e` string, here-string, `eval` arg, or heredoc
+/// body) — never against surrounding data such as comments, commit messages, or
+/// prose that merely mentions an interpreter (issue #18).
+pub fn is_interpreter_obfuscation(cmd: &str) -> bool {
+    for (kind, payload) in interpreter_code_payloads(cmd) {
+        if OBFUSCATION_SIGNALS.iter().any(|re| re.is_match(&payload)) {
+            return true;
+        }
+        if kind == PayloadKind::Inline && EXECUTION_SIGNALS.iter().any(|re| re.is_match(&payload)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The executable code payloads an interpreter/shell is invoked with in `cmd`.
+/// Reuses the same command-resolution predicates as path extraction so the two
+/// stay consistent (issue #27): only segments whose effective command is a
+/// shell/interpreter contribute a payload.
+fn interpreter_code_payloads(cmd: &str) -> Vec<(PayloadKind, String)> {
+    let parsed = tokenize_shell(cmd);
+    let mut payloads = Vec::new();
+
+    let mut segment: Vec<&ShellToken> = Vec::new();
+    for tok in &parsed.tokens {
+        if let ShellToken::Op(op) = tok {
+            if matches!(*op, "&&" | "||" | ";" | "|" | "&" | "(" | ")" | "`") {
+                collect_payloads_from_segment(&segment, &mut payloads);
+                segment.clear();
+                continue;
+            }
+        }
+        segment.push(tok);
+    }
+    collect_payloads_from_segment(&segment, &mut payloads);
+
+    for heredoc in &parsed.heredocs {
+        if is_shell_or_interpreter(&heredoc.consumer) {
+            payloads.push((PayloadKind::Script, heredoc.body.clone()));
+        }
+    }
+    payloads
+}
+
+fn collect_payloads_from_segment(
+    tokens: &[&ShellToken],
+    payloads: &mut Vec<(PayloadKind, String)>,
+) {
+    let words: Vec<&str> = tokens
+        .iter()
+        .filter_map(|t| match t {
+            ShellToken::Word(w) => Some(w.as_str()),
+            _ => None,
+        })
+        .collect();
+    if words.is_empty() {
+        return;
+    }
+    let eff_idx = effective_command_index(&words);
+    let eff = words
+        .get(eff_idx)
+        .map(|w| command_basename(w))
+        .unwrap_or("");
+    if !is_shell_or_interpreter(eff) {
+        return;
+    }
+
+    let mut pending = false;
+    let mut word_no = 0usize;
+    for tok in tokens {
+        match tok {
+            ShellToken::Op("<<<") => pending = true,
+            ShellToken::Op(_) => {}
+            ShellToken::Word(w) => {
+                if std::mem::take(&mut pending) {
+                    payloads.push((PayloadKind::Inline, w.to_string()));
+                } else if word_no > eff_idx {
+                    if eff == "eval" {
+                        payloads.push((PayloadKind::Inline, w.to_string()));
+                    } else if is_code_flag(w) {
+                        pending = true;
+                    }
+                }
+                word_no += 1;
             }
         }
     }
-
-    false
 }
 
 /// Extract all file paths from a command, resolving variable assignments.
@@ -1204,6 +1301,50 @@ mod tests {
         // os.system
         assert!(is_interpreter_obfuscation(
             r#"python3 -c "import os; os.system('terraform destroy')""#
+        ));
+    }
+
+    #[test]
+    fn test_heredoc_interpreter_clean_code_not_flagged() {
+        // Issue #18: a readable heredoc script must not be flagged just because
+        // it reads/writes files or its comments mention an interpreter.
+        let cmd = "python3 - <<'PY'\n\
+                   import re\n\
+                   text = open('railguard.yaml').read()\n\
+                   blocks = re.split(r'(?m)^(?=\\S)', text)\n\
+                   # reorder top-level keys, cf. python3 -c usage in docs\n\
+                   open('railguard.yaml', 'w').write('\\n'.join(sorted(blocks)))\n\
+                   PY";
+        assert!(!is_interpreter_obfuscation(cmd));
+    }
+
+    #[test]
+    fn test_heredoc_interpreter_obfuscated_payload_flagged() {
+        // Same shape, but the body genuinely obfuscates — must still be caught.
+        let cmd = "python3 - <<'PY'\n\
+                   import base64, os\n\
+                   os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())\n\
+                   PY";
+        assert!(is_interpreter_obfuscation(cmd));
+    }
+
+    #[test]
+    fn test_signal_word_outside_payload_not_flagged() {
+        // Signal words in data (commit messages, echoed docs) are not payloads.
+        assert!(!is_interpreter_obfuscation(
+            r#"git commit -m "document python3 -e usage and b64decode helper""#
+        ));
+        assert!(!is_interpreter_obfuscation(
+            r#"python3 script.py && echo "see base64.b64decode docs""#
+        ));
+    }
+
+    #[test]
+    fn test_inline_readable_write_join_not_flagged() {
+        // Readable open().write('\n'.join(...)) is not obfuscation — the '\n'
+        // join has no path-assembly quote-slash signal.
+        assert!(!is_interpreter_obfuscation(
+            r#"python3 -c "open('out.txt','w').write('\n'.join(['a','b']))""#
         ));
     }
 

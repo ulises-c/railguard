@@ -293,6 +293,97 @@ fn tier3_retry_after_block_asks_user() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// ISSUE #18: detector false positives
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn benign_git_sequence_never_flagged() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let input1 = make_bash_input(
+        &sid,
+        cwd,
+        r#"git add src/foo.rs && git commit -m "fix: update foo""#,
+    );
+    let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
+    assert!(!output_is_not_allowed(&stdout1), "first git: {}", stdout1);
+
+    let input2 = make_bash_input(&sid, cwd, "git log --oneline -1 && grep -n foo src/foo.rs");
+    let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
+    assert!(!output_is_not_allowed(&stdout2), "second git: {}", stdout2);
+}
+
+#[test]
+fn tier1_ask_does_not_cascade_into_tier3() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    // A Tier-1 ask (transform-pipe-to-shell) whose text shares words with the
+    // routine follow-up. The ask must not arm retry detection.
+    let input1 = make_bash_input(&sid, cwd, "rev <<< 'railguard yaml reorder' | sh");
+    let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
+    assert!(
+        output_contains_ask(&stdout1),
+        "tier1 should ask: {}",
+        stdout1
+    );
+
+    let input2 = make_bash_input(
+        &sid,
+        cwd,
+        r#"git add railguard.yaml && git commit -m "reorder yaml""#,
+    );
+    let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
+    assert!(
+        !output_is_not_allowed(&stdout2),
+        "routine command after a tier1 ask must not be flagged: {}",
+        stdout2
+    );
+}
+
+#[test]
+fn heredoc_python_clean_allowed() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let cmd = "python3 - <<'PY'\n\
+               import re\n\
+               text = open('railguard.yaml').read()\n\
+               open('railguard.yaml', 'w').write('\\n'.join(sorted(text.split('\\n'))))\n\
+               PY";
+    let input = make_bash_input(&sid, cwd, cmd);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "clean heredoc script must be allowed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn heredoc_python_obfuscated_asks() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let cmd = "python3 - <<'PY'\n\
+               import base64, os\n\
+               os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())\n\
+               PY";
+    let input = make_bash_input(&sid, cwd, cmd);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "obfuscated heredoc payload must be caught: {}",
+        stdout
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // SESSION STATE PERSISTENCE
 // ═══════════════════════════════════════════════════════════════════
 

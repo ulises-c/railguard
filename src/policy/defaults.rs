@@ -284,10 +284,14 @@ pub fn default_blocklist() -> Vec<Rule> {
             action: "block".to_string(),
             message: Some("Blocked: text transform piped to shell can construct any command".to_string()),
         },
+        // Backstop for the inline `-c`/`-e` case; the authoritative detector is
+        // evasion::is_interpreter_obfuscation (runs first, payload-scoped, also
+        // covers heredocs). Keep this alternation in sync with that signal list
+        // until #27 consolidates the duplicated interpreter detection.
         Rule {
             name: "interpreter-obfuscation".to_string(),
             tool: "Bash".to_string(),
-            pattern: r#"(?:python3?|ruby|perl|node)\s+-[ec]\s+.*(?:b64decode|b64encode|base64\..*decode|chr\s*\(|\\x[0-9a-fA-F]{2}|eval\s*\(|exec\s*\(|system\s*\(|os\.system|os\.popen|subprocess|Popen\s*\(|fromCharCode|['"]/'*\s*\.\s*join\s*\(|open\s*\(.*\.join\s*\(|open\s*\(.*chr\s*\()"#.to_string(),
+            pattern: r#"(?:python3?|ruby|perl|node)\s+-[ec]\s+.*(?:b64decode|b64encode|base64\..*decode|chr\s*\(|\\x[0-9a-fA-F]{2}|eval\s*\(|exec\s*\(|system\s*\(|os\.system|os\.popen|subprocess|Popen\s*\(|fromCharCode|['"]/'*\s*\.\s*join\s*\()"#.to_string(),
             action: "block".to_string(),
             message: Some("Blocked: interpreter with string obfuscation can bypass command detection".to_string()),
         },

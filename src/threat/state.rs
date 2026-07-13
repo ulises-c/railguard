@@ -62,6 +62,11 @@ pub struct BlockEvent {
     pub rule: String,
     pub keywords: Vec<String>,
     pub tier: u8,
+    /// True only when the command was actually denied (policy block, path
+    /// fence). Asks (tier 1/2/3 approval prompts) are recorded for audit but
+    /// are not "blocked commands" for retry detection.
+    #[serde(default)]
+    pub denied: bool,
 }
 
 impl SessionState {
@@ -257,11 +262,34 @@ impl SessionState {
             rule: rule.to_string(),
             keywords: keywords.clone(),
             tier,
+            denied: true,
         });
 
         // Enter heightened state: watch for keywords in next 3 tool calls
         self.heightened_until_call = Some(self.tool_call_count + 3);
         self.heightened_keywords = keywords;
+    }
+
+    /// Record an approval prompt. Kept in history for audit, but an ask is not
+    /// a block: it must not arm the retry-detection window, or routine
+    /// commands after a false-positive ask cascade into Tier 3 (issue #18).
+    pub fn record_ask(&mut self, command: &str, rule: &str, keywords: Vec<String>, tier: u8) {
+        self.block_history.push(BlockEvent {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            tool_call_count: self.tool_call_count,
+            command: command.chars().take(500).collect(),
+            rule: rule.to_string(),
+            keywords,
+            tier,
+            denied: false,
+        });
+    }
+
+    /// Denied commands still inside the retry-watch window.
+    pub fn recent_denied_blocks(&self) -> impl Iterator<Item = &BlockEvent> {
+        self.block_history
+            .iter()
+            .filter(|b| b.denied && self.tool_call_count <= b.tool_call_count + 3)
     }
 
     pub fn record_warning(&mut self) {
