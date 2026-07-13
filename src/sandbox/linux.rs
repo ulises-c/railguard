@@ -43,7 +43,11 @@ pub fn generate_bwrap_command(config: &FenceConfig, cwd: &str) -> String {
     // Always shadow sensitive dirs
     for sensitive in &[".ssh", ".aws", ".gnupg"] {
         let full = format!("{}/{}", home, sensitive);
-        if !config.denied_paths.iter().any(|d| expand_path(d, &home) == full) {
+        if !config
+            .denied_paths
+            .iter()
+            .any(|d| expand_path(d, &home) == full)
+        {
             args.push(format!("--tmpfs {}", full));
         }
     }

@@ -1,14 +1,14 @@
-/// Evasion detection and command normalization.
-///
-/// AI agents have been documented bypassing text-based safety rules by:
-/// - Base64 encoding commands
-/// - Using variable substitution ($CMD)
-/// - Hex encoding
-/// - String concatenation tricks
-/// - Using eval/xargs/sh -c indirection
-/// - Backtick/subshell command substitution
-///
-/// This module normalizes commands before pattern matching to catch these.
+//! Evasion detection and command normalization.
+//!
+//! AI agents have been documented bypassing text-based safety rules by:
+//! - Base64 encoding commands
+//! - Using variable substitution ($CMD)
+//! - Hex encoding
+//! - String concatenation tricks
+//! - Using eval/xargs/sh -c indirection
+//! - Backtick/subshell command substitution
+//!
+//! This module normalizes commands before pattern matching to catch these.
 
 use base64::Engine;
 use std::sync::LazyLock;
@@ -107,7 +107,9 @@ fn detect_base64_pipe(cmd: &str) -> Option<String> {
         if let Ok(re) = regex::Regex::new(pattern) {
             if let Some(caps) = re.captures(cmd) {
                 if let Some(b64) = caps.get(1) {
-                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.as_str()) {
+                    if let Ok(bytes) =
+                        base64::engine::general_purpose::STANDARD.decode(b64.as_str())
+                    {
                         if let Ok(decoded) = String::from_utf8(bytes) {
                             return Some(decoded);
                         }
@@ -132,8 +134,7 @@ fn detect_eval_concat(cmd: &str) -> Option<String> {
     let unquoted = rest
         .replace("\"\"", "")
         .replace("''", "")
-        .replace('"', "")
-        .replace('\'', "");
+        .replace(['"', '\''], "");
 
     if unquoted != *rest {
         Some(unquoted)
@@ -142,32 +143,64 @@ fn detect_eval_concat(cmd: &str) -> Option<String> {
     }
 }
 
-/// Detect: CMD="terraform destroy"; $CMD  or  export X=terraform; $X destroy
+static VAR_EXPANSION_ASSIGN_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r#"(\w+)=(?:"([^"]*)"|'([^']*)'|([^\s;&|"']+))"#).unwrap());
+
+/// Detect: CMD="terraform destroy"; $CMD  or  X=terraform && $X destroy
+///
+/// The regex crate has no backreferences, so instead of matching
+/// assignment and reference in one pattern, parse each assignment and
+/// search the remainder for a bare `$name` reference. This also survives
+/// decoy pairs (`A=v; $AB=x; $AB`) that a single left-to-right
+/// non-overlapping scan would consume.
 fn detect_variable_expansion(cmd: &str) -> Option<String> {
-    let re = regex::Regex::new(r#"(\w+)=["']?([^"';]+)["']?\s*[;&]\s*\$\1\b(.*)"#).ok()?;
-    if let Some(caps) = re.captures(cmd) {
-        let value = caps.get(2)?.as_str();
-        let rest = caps.get(3).map(|m| m.as_str()).unwrap_or("");
-        Some(format!("{}{}", value, rest))
-    } else {
-        None
+    for caps in VAR_EXPANSION_ASSIGN_RE.captures_iter(cmd) {
+        let name = caps.get(1)?.as_str();
+        let value = caps
+            .get(2)
+            .or_else(|| caps.get(3))
+            .or_else(|| caps.get(4))?
+            .as_str();
+        let after = &cmd[caps.get(0)?.end()..];
+        if let Some(pos) = find_bare_var_ref(after, name) {
+            let rest = &after[pos + name.len() + 1..];
+            return Some(format!("{}{}", value, rest));
+        }
     }
+    None
+}
+
+/// Find `$name` in `s` where it is not a prefix of a longer variable name.
+fn find_bare_var_ref(s: &str, name: &str) -> Option<usize> {
+    let pat = format!("${}", name);
+    let mut start = 0;
+    while let Some(i) = s[start..].find(&pat) {
+        let abs = start + i;
+        let end = abs + pat.len();
+        let at_boundary = s[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if at_boundary {
+            return Some(abs);
+        }
+        start = end;
+    }
+    None
 }
 
 /// Detect: sh -c "dangerous command" or bash -c "..."
 fn detect_shell_wrapper(cmd: &str) -> Option<String> {
     let re = regex::Regex::new(r#"(?:sh|bash|zsh)\s+-c\s+["'](.+?)["']"#).ok()?;
-    re.captures(cmd).and_then(|caps| {
-        caps.get(1).map(|m| m.as_str().to_string())
-    })
+    re.captures(cmd)
+        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
 
 /// Detect: echo "cmd" | xargs ...
 fn detect_xargs(cmd: &str) -> Option<String> {
     let re = regex::Regex::new(r#"echo\s+["'](.+?)["']\s*\|\s*xargs"#).ok()?;
-    re.captures(cmd).and_then(|caps| {
-        caps.get(1).map(|m| m.as_str().to_string())
-    })
+    re.captures(cmd)
+        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
 
 /// Detect: $'\x74\x65\x72\x72...' hex escape sequences
@@ -228,11 +261,7 @@ fn detect_multi_variable_concat(cmd: &str) -> Option<String> {
     }
 
     // Find the execution portion (after the last ; or &&)
-    let exec_part = cmd
-        .rsplit(|c| c == ';' || c == '&')
-        .next()
-        .unwrap_or("")
-        .trim();
+    let exec_part = cmd.rsplit([';', '&']).next().unwrap_or("").trim();
 
     if exec_part.is_empty() {
         return None;
@@ -246,12 +275,10 @@ fn detect_multi_variable_concat(cmd: &str) -> Option<String> {
     }
 
     // Remove surrounding quotes from the expanded result
-    let expanded = expanded
-        .replace('"', "")
-        .replace('\'', "");
+    let expanded = expanded.replace(['"', '\''], "");
     let expanded = expanded.trim().to_string();
 
-    if expanded != exec_part.replace('"', "").replace('\'', "").trim() {
+    if expanded != exec_part.replace(['"', '\''], "").trim() {
         Some(expanded)
     } else {
         None
@@ -262,8 +289,7 @@ fn detect_multi_variable_concat(cmd: &str) -> Option<String> {
 /// e.g., echo 'ZEdWeWNtRm1iM0p0SUdSbGMzUnliM2s9' | base64 -d | base64 -d | sh
 fn detect_recursive_base64(cmd: &str) -> Option<String> {
     // Count how many `base64 -d` / `base64 --decode` stages there are
-    let decode_count = cmd.matches("base64 -d").count()
-        + cmd.matches("base64 --decode").count();
+    let decode_count = cmd.matches("base64 -d").count() + cmd.matches("base64 --decode").count();
 
     if decode_count < 2 {
         return None;
@@ -292,9 +318,7 @@ fn detect_recursive_base64(cmd: &str) -> Option<String> {
 /// Catches: rev | sh, tr ... | sh, sed ... | sh, awk ... | sh
 /// These transforms can construct any command at runtime.
 pub fn is_transform_pipe_to_shell(cmd: &str) -> bool {
-    let re = regex::Regex::new(
-        r"(?:rev|tr\s+|sed\s+|awk\s+).*\|\s*(?:sh|bash|zsh|eval|source)\b"
-    );
+    let re = regex::Regex::new(r"(?:rev|tr\s+|sed\s+|awk\s+).*\|\s*(?:sh|bash|zsh|eval|source)\b");
     match re {
         Ok(re) => re.is_match(cmd),
         Err(_) => false,
@@ -306,9 +330,7 @@ pub fn is_transform_pipe_to_shell(cmd: &str) -> bool {
 /// The combination of an interpreter with string manipulation is suspicious.
 pub fn is_interpreter_obfuscation(cmd: &str) -> bool {
     // Check if command invokes an interpreter with inline code
-    let interpreter_re = regex::Regex::new(
-        r"(?:python3?|ruby|perl|node)\s+(?:-[ec]\s+|-e\s+)"
-    );
+    let interpreter_re = regex::Regex::new(r"(?:python3?|ruby|perl|node)\s+(?:-[ec]\s+|-e\s+)");
     let has_interpreter = match &interpreter_re {
         Ok(re) => re.is_match(cmd),
         Err(_) => false,
@@ -555,7 +577,8 @@ fn is_env_assignment(w: &str) -> bool {
 fn is_wrapper(cmd: &str) -> bool {
     matches!(
         cmd,
-        "env" | "command"
+        "env"
+            | "command"
             | "exec"
             | "nohup"
             | "nice"
@@ -583,7 +606,9 @@ fn is_code_flag(w: &str) -> bool {
         || (w.len() >= 2
             && w.starts_with('-')
             && !w.starts_with("--")
-            && w[1..].chars().any(|c| matches!(c, 'c' | 'e' | 'E' | 'n' | 'p')))
+            && w[1..]
+                .chars()
+                .any(|c| matches!(c, 'c' | 'e' | 'E' | 'n' | 'p')))
 }
 
 fn push_candidate(word: &str, paths: &mut Vec<String>) {
@@ -1020,6 +1045,49 @@ mod tests {
     }
 
     #[test]
+    fn test_variable_expansion_unquoted_single_var() {
+        // Regression for the dead-backreference bug: the unquoted form is not
+        // covered by detect_multi_variable_concat (its assignment regex
+        // requires quotes), so only detect_variable_expansion catches it.
+        let cmd = "CMD=terraform; $CMD destroy";
+        let expanded = detect_variable_expansion(cmd);
+        assert_eq!(expanded.as_deref(), Some("terraform destroy"));
+        let variants = normalize_command(cmd);
+        assert!(
+            variants.iter().any(|v| v.contains("terraform destroy")),
+            "unquoted single-var expansion should normalize: {:?}",
+            variants
+        );
+    }
+
+    #[test]
+    fn test_variable_expansion_skips_mismatched_reference() {
+        assert_eq!(detect_variable_expansion("A=foo; $B run"), None);
+        // A later matching pair is still found after a mismatched one.
+        let expanded = detect_variable_expansion("A=foo; $B; C=terraform; $C destroy");
+        assert_eq!(expanded.as_deref(), Some("terraform destroy"));
+    }
+
+    #[test]
+    fn test_variable_expansion_decoy_pair_does_not_mask_real_one() {
+        // A decoy assignment/reference whose names share a prefix must not
+        // consume the genuine pair (found by adversarial review).
+        let expanded = detect_variable_expansion("A=v; $AB=terraform; $AB destroy");
+        assert_eq!(expanded.as_deref(), Some("terraform destroy"));
+    }
+
+    #[test]
+    fn test_variable_expansion_and_separator_stays_clean() {
+        // `&&`-chained assignments must not leak a stray `&` into the
+        // expanded variant (would break downstream contiguous matching).
+        let expanded = detect_variable_expansion("X=danger && $X -rf /");
+        assert_eq!(expanded.as_deref(), Some("danger -rf /"));
+
+        let expanded = detect_variable_expansion(r#"V="two words" && $V"#);
+        assert_eq!(expanded.as_deref(), Some("two words"));
+    }
+
+    #[test]
     fn test_shell_wrapper() {
         let cmd = r#"sh -c "terraform destroy""#;
         let variants = normalize_command(cmd);
@@ -1059,7 +1127,9 @@ mod tests {
     fn test_whitespace_collapse() {
         let cmd = "terraform    destroy   --auto-approve";
         let variants = normalize_command(cmd);
-        assert!(variants.iter().any(|v| v == "terraform destroy --auto-approve"));
+        assert!(variants
+            .iter()
+            .any(|v| v == "terraform destroy --auto-approve"));
     }
 
     #[test]
@@ -1072,8 +1142,12 @@ mod tests {
 
     #[test]
     fn test_transform_pipe_to_shell() {
-        assert!(is_transform_pipe_to_shell("rev <<< 'yortsed mrofarret' | sh"));
-        assert!(is_transform_pipe_to_shell("tr 'a-z' 'n-za-m' <<< 'greensbez' | bash"));
+        assert!(is_transform_pipe_to_shell(
+            "rev <<< 'yortsed mrofarret' | sh"
+        ));
+        assert!(is_transform_pipe_to_shell(
+            "tr 'a-z' 'n-za-m' <<< 'greensbez' | bash"
+        ));
         assert!(is_transform_pipe_to_shell("sed 's/x/y/g' file.txt | sh"));
         assert!(!is_transform_pipe_to_shell("rev file.txt")); // no pipe to sh
         assert!(!is_transform_pipe_to_shell("echo hello | sh")); // not a transform
@@ -1144,9 +1218,7 @@ mod tests {
             r#"python3 -c "print(open('/tmp/output.txt').read())""#
         ));
         // Safe: math with + — should NOT trigger
-        assert!(!is_interpreter_obfuscation(
-            r#"python3 -c "print(1 + 2)""#
-        ));
+        assert!(!is_interpreter_obfuscation(r#"python3 -c "print(1 + 2)""#));
         // Safe: not an interpreter
         assert!(!is_interpreter_obfuscation("echo base64 | sh"));
     }
@@ -1209,8 +1281,7 @@ mod tests {
 
     #[test]
     fn test_sed_program_not_a_path() {
-        let paths =
-            extract_paths_from_command(r#"sed -n '/<<<<<<< /,/>>>>>>> /p' src/main.rs"#);
+        let paths = extract_paths_from_command(r#"sed -n '/<<<<<<< /,/>>>>>>> /p' src/main.rs"#);
         assert!(paths.is_empty(), "sed program text extracted: {:?}", paths);
     }
 
@@ -1284,10 +1355,12 @@ mod tests {
 
     #[test]
     fn test_redirect_targets_extracted() {
-        assert!(extract_paths_from_command("echo x > /etc/passwd")
-            .contains(&"/etc/passwd".to_string()));
-        assert!(extract_paths_from_command("echo x >/etc/passwd")
-            .contains(&"/etc/passwd".to_string()));
+        assert!(
+            extract_paths_from_command("echo x > /etc/passwd").contains(&"/etc/passwd".to_string())
+        );
+        assert!(
+            extract_paths_from_command("echo x >/etc/passwd").contains(&"/etc/passwd".to_string())
+        );
     }
 
     #[test]
@@ -1302,8 +1375,7 @@ mod tests {
     fn test_interpreter_payload_scanned() {
         let paths = extract_paths_from_command(r#"bash -c "cat ~/.ssh/id_rsa""#);
         assert!(paths.contains(&"~/.ssh/id_rsa".to_string()), "{:?}", paths);
-        let paths =
-            extract_paths_from_command(r#"python3 -c "open('/home/u/.aws/credentials')""#);
+        let paths = extract_paths_from_command(r#"python3 -c "open('/home/u/.aws/credentials')""#);
         assert!(
             paths.contains(&"/home/u/.aws/credentials".to_string()),
             "{:?}",
@@ -1359,8 +1431,10 @@ mod tests {
 
     #[test]
     fn test_copy_outside_extracted() {
-        assert!(extract_paths_from_command("cp secrets.txt ~/Dropbox/exfil.txt")
-            .contains(&"~/Dropbox/exfil.txt".to_string()));
+        assert!(
+            extract_paths_from_command("cp secrets.txt ~/Dropbox/exfil.txt")
+                .contains(&"~/Dropbox/exfil.txt".to_string())
+        );
     }
 
     // ── wrapper / combined-flag / unknown-interpreter payloads must not escape ──
@@ -1383,14 +1457,18 @@ mod tests {
 
     #[test]
     fn test_combined_short_flag_payload_scanned() {
-        assert!(extract_paths_from_command(r#"bash -cx "cat ~/.ssh/id_rsa""#)
-            .contains(&"~/.ssh/id_rsa".to_string()));
+        assert!(
+            extract_paths_from_command(r#"bash -cx "cat ~/.ssh/id_rsa""#)
+                .contains(&"~/.ssh/id_rsa".to_string())
+        );
     }
 
     #[test]
     fn test_versioned_and_busybox_interpreters_scanned() {
-        assert!(extract_paths_from_command(r#"python3.12 -c "open('/etc/shadow')""#)
-            .contains(&"/etc/shadow".to_string()));
+        assert!(
+            extract_paths_from_command(r#"python3.12 -c "open('/etc/shadow')""#)
+                .contains(&"/etc/shadow".to_string())
+        );
         let cmd = "busybox sh <<EOF\ncat /etc/shadow\nEOF";
         assert!(extract_paths_from_command(cmd).contains(&"/etc/shadow".to_string()));
     }
@@ -1408,47 +1486,51 @@ mod tests {
     fn test_glob_and_metachar_operands_extract_prefix() {
         // A word starting with a path but ending in a metachar must still yield
         // the leading path — the fence checks the directory it points into.
-        assert!(extract_paths_from_command("rm -rf ~/.ssh/*")
-            .contains(&"~/.ssh/".to_string()));
+        assert!(extract_paths_from_command("rm -rf ~/.ssh/*").contains(&"~/.ssh/".to_string()));
         assert!(extract_paths_from_command("cat /etc/*").contains(&"/etc/".to_string()));
-        assert!(extract_paths_from_command("cat ~/.ssh/id_*")
-            .contains(&"~/.ssh/id_".to_string()));
-        assert!(extract_paths_from_command("docker run -v /etc/secret:/data img")
-            .contains(&"/etc/secret".to_string()));
+        assert!(extract_paths_from_command("cat ~/.ssh/id_*").contains(&"~/.ssh/id_".to_string()));
+        assert!(
+            extract_paths_from_command("docker run -v /etc/secret:/data img")
+                .contains(&"/etc/secret".to_string())
+        );
     }
 
     #[test]
     fn test_prefix_extraction_does_not_reach_across_words() {
         // Leading-prefix extraction must not resurrect the mid-prose FP.
-        assert!(extract_paths_from_command(r#"echo "the file /etc/passwd is famous""#)
-            .is_empty());
+        assert!(extract_paths_from_command(r#"echo "the file /etc/passwd is famous""#).is_empty());
     }
 
     #[test]
     fn test_interpreter_payload_glued_path_scanned() {
         // A path glued to code punctuation isn't a standalone shell word, so the
         // recursed-payload substring scan must catch it.
-        assert!(extract_paths_from_command(r#"perl -e 'open(F,"/etc/shadow")'"#)
-            .contains(&"/etc/shadow".to_string()));
         assert!(
-            extract_paths_from_command(r#"python3 -c "subprocess.run(['cat','/etc/shadow'])""#)
+            extract_paths_from_command(r#"perl -e 'open(F,"/etc/shadow")'"#)
                 .contains(&"/etc/shadow".to_string())
         );
+        assert!(extract_paths_from_command(
+            r#"python3 -c "subprocess.run(['cat','/etc/shadow'])""#
+        )
+        .contains(&"/etc/shadow".to_string()));
     }
 
     #[test]
     fn test_uppercase_and_autoloop_code_flags_scanned() {
-        assert!(extract_paths_from_command(r#"perl -E 'open("/etc/passwd")'"#)
-            .contains(&"/etc/passwd".to_string()));
-        assert!(extract_paths_from_command(r#"perl -ne 'print if -e "/etc/hosts"'"#)
-            .contains(&"/etc/hosts".to_string()));
+        assert!(
+            extract_paths_from_command(r#"perl -E 'open("/etc/passwd")'"#)
+                .contains(&"/etc/passwd".to_string())
+        );
+        assert!(
+            extract_paths_from_command(r#"perl -ne 'print if -e "/etc/hosts"'"#)
+                .contains(&"/etc/hosts".to_string())
+        );
     }
 
     #[test]
     fn test_trailing_comment_path_not_extracted() {
         assert!(extract_paths_from_command("make build # writes to /etc/hosts").is_empty());
         // A mid-word '#' is literal, not a comment.
-        assert!(extract_paths_from_command("cat /etc/pass#wd")
-            .contains(&"/etc/pass".to_string()));
+        assert!(extract_paths_from_command("cat /etc/pass#wd").contains(&"/etc/pass".to_string()));
     }
 }

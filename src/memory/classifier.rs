@@ -92,7 +92,10 @@ fn has_frontmatter_type(content: &str, type_name: &str) -> bool {
     // Find closing ---
     if let Some(end) = trimmed[3..].find("---") {
         let frontmatter = &trimmed[3..3 + end];
-        if let Ok(re) = Regex::new(&format!(r"(?m)^\s*type:\s*{}\s*$", regex::escape(type_name))) {
+        if let Ok(re) = Regex::new(&format!(
+            r"(?m)^\s*type:\s*{}\s*$",
+            regex::escape(type_name)
+        )) {
             return re.is_match(frontmatter);
         }
     }
@@ -180,7 +183,8 @@ mod tests {
 
     #[test]
     fn test_factual_reference() {
-        let content = "---\nname: bug-tracker\ntype: reference\n---\nBugs tracked in Linear project INGEST.";
+        let content =
+            "---\nname: bug-tracker\ntype: reference\n---\nBugs tracked in Linear project INGEST.";
         assert_eq!(classify(content), MemoryClassification::Factual);
     }
 

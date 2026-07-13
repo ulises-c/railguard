@@ -15,7 +15,12 @@ pub fn rollback_by_id(
     let entry = manifest
         .iter()
         .find(|e| e.id == snapshot_id)
-        .ok_or_else(|| format!("Snapshot '{}' not found in session '{}'", snapshot_id, session_id))?;
+        .ok_or_else(|| {
+            format!(
+                "Snapshot '{}' not found in session '{}'",
+                snapshot_id, session_id
+            )
+        })?;
 
     restore_entry(snapshot_dir, entry)
 }
@@ -32,7 +37,12 @@ pub fn rollback_file(
         .iter()
         .rev()
         .find(|e| e.file_path == file_path)
-        .ok_or_else(|| format!("No snapshot found for '{}' in session '{}'", file_path, session_id))?;
+        .ok_or_else(|| {
+            format!(
+                "No snapshot found for '{}' in session '{}'",
+                file_path, session_id
+            )
+        })?;
 
     restore_entry(snapshot_dir, entry)
 }
@@ -108,19 +118,20 @@ fn restore_entry(snapshot_dir: &Path, entry: &SnapshotEntry) -> Result<String, S
         return Err(format!("Snapshot file missing for {}", entry.file_path));
     }
 
-    let content = fs::read(&snap_path)
-        .map_err(|e| format!("Failed to read snapshot: {}", e))?;
+    let content = fs::read(&snap_path).map_err(|e| format!("Failed to read snapshot: {}", e))?;
 
     // Ensure parent directory exists
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create directory: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
     }
 
     fs::write(target, &content)
         .map_err(|e| format!("Failed to restore {}: {}", entry.file_path, e))?;
 
-    Ok(format!("Restored {} from snapshot {}", entry.file_path, entry.id))
+    Ok(format!(
+        "Restored {} from snapshot {}",
+        entry.file_path, entry.id
+    ))
 }
 
 /// List snapshots for a session in a human-readable format.

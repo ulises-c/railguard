@@ -204,19 +204,28 @@ mod tests {
         let config = default_fence("/project");
         let home = dirs::home_dir().unwrap();
         let ssh_path = format!("{}/.ssh/authorized_keys", home.display());
-        assert!(matches!(check_path(&config, &ssh_path, "/project"), PathCheck::Denied(_)));
+        assert!(matches!(
+            check_path(&config, &ssh_path, "/project"),
+            PathCheck::Denied(_)
+        ));
     }
 
     #[test]
     fn test_etc_blocked() {
         let config = default_fence("/project");
-        assert!(matches!(check_path(&config, "/etc/passwd", "/project"), PathCheck::Denied(_)));
+        assert!(matches!(
+            check_path(&config, "/etc/passwd", "/project"),
+            PathCheck::Denied(_)
+        ));
     }
 
     #[test]
     fn test_project_path_allowed() {
         let config = default_fence("/project");
-        assert_eq!(check_path(&config, "/project/src/main.rs", "/project"), PathCheck::Allow);
+        assert_eq!(
+            check_path(&config, "/project/src/main.rs", "/project"),
+            PathCheck::Allow
+        );
     }
 
     #[test]
@@ -227,7 +236,10 @@ mod tests {
             denied_paths: vec!["/etc".to_string()],
             allow_local_overrides: false,
         };
-        assert_eq!(check_path(&config, "/etc/passwd", "/project"), PathCheck::Allow);
+        assert_eq!(
+            check_path(&config, "/etc/passwd", "/project"),
+            PathCheck::Allow
+        );
     }
 
     #[test]
@@ -238,7 +250,10 @@ mod tests {
             denied_paths: vec![],
             allow_local_overrides: false,
         };
-        assert!(matches!(check_path(&config, "/other/file.txt", "/project"), PathCheck::OutsideProject(_)));
+        assert!(matches!(
+            check_path(&config, "/other/file.txt", "/project"),
+            PathCheck::OutsideProject(_)
+        ));
     }
 
     #[test]
@@ -249,9 +264,18 @@ mod tests {
             denied_paths: vec![],
             allow_local_overrides: false,
         };
-        assert_eq!(check_path(&config, "/project/src/main.rs", "/project"), PathCheck::Allow);
-        assert_eq!(check_path(&config, "/tmp/test.txt", "/project"), PathCheck::Allow);
-        assert!(matches!(check_path(&config, "/other/file.txt", "/project"), PathCheck::OutsideProject(_)));
+        assert_eq!(
+            check_path(&config, "/project/src/main.rs", "/project"),
+            PathCheck::Allow
+        );
+        assert_eq!(
+            check_path(&config, "/tmp/test.txt", "/project"),
+            PathCheck::Allow
+        );
+        assert!(matches!(
+            check_path(&config, "/other/file.txt", "/project"),
+            PathCheck::OutsideProject(_)
+        ));
     }
 
     #[test]
@@ -263,9 +287,18 @@ mod tests {
             denied_paths: vec![],
             allow_local_overrides: false,
         };
-        assert_eq!(check_path(&config, "/project/src/main.rs", "/project"), PathCheck::Allow);
-        assert_eq!(check_path(&config, "/tmp/test.txt", "/project"), PathCheck::Allow);
-        assert!(matches!(check_path(&config, "/other/file.txt", "/project"), PathCheck::OutsideProject(_)));
+        assert_eq!(
+            check_path(&config, "/project/src/main.rs", "/project"),
+            PathCheck::Allow
+        );
+        assert_eq!(
+            check_path(&config, "/tmp/test.txt", "/project"),
+            PathCheck::Allow
+        );
+        assert!(matches!(
+            check_path(&config, "/other/file.txt", "/project"),
+            PathCheck::OutsideProject(_)
+        ));
     }
 
     #[test]

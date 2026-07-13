@@ -95,7 +95,12 @@ fn policy_anchor_survives_cwd_drift() {
     let sid = format!("anchor-drift-{}", std::process::id());
 
     // Anchor the session at the real project root.
-    run_hook(&binary, "SessionStart", rg_home.path(), &session_start(project.path(), &sid));
+    run_hook(
+        &binary,
+        "SessionStart",
+        rg_home.path(),
+        &session_start(project.path(), &sid),
+    );
     assert!(
         rg_home.path().join("sessions").join(&sid).exists(),
         "SessionStart should write a global project-root pointer"
@@ -126,7 +131,12 @@ fn genuinely_outside_path_still_fenced_after_drift() {
     let project = make_project(allowed.path());
     let sid = format!("anchor-outside-{}", std::process::id());
 
-    run_hook(&binary, "SessionStart", rg_home.path(), &session_start(project.path(), &sid));
+    run_hook(
+        &binary,
+        "SessionStart",
+        rg_home.path(),
+        &session_start(project.path(), &sid),
+    );
 
     let target = outside.path().join("evil.txt");
     let stdout = run_hook(
@@ -155,7 +165,12 @@ fn fence_root_stable_without_session_start() {
 
     // First PreToolUse at the project root — no prior SessionStart.
     let in_project = project.path().join("readme.md");
-    run_hook(&binary, "PreToolUse", rg_home.path(), &write_input(project.path(), &sid, &in_project));
+    run_hook(
+        &binary,
+        "PreToolUse",
+        rg_home.path(),
+        &write_input(project.path(), &sid, &in_project),
+    );
     assert!(
         rg_home.path().join("sessions").join(&sid).exists(),
         "first PreToolUse should back-fill the global pointer"
@@ -191,7 +206,12 @@ fn drifted_first_call_without_session_start_does_not_stick() {
     // First call already outside any repo. It resolves for this call but the
     // untrustworthy cwd fallback must NOT be persisted as the session anchor.
     let scratch = outside.path().join("scratch.txt");
-    run_hook(&binary, "PreToolUse", rg_home.path(), &write_input(outside.path(), &sid, &scratch));
+    run_hook(
+        &binary,
+        "PreToolUse",
+        rg_home.path(),
+        &write_input(outside.path(), &sid, &scratch),
+    );
     assert!(
         !rg_home.path().join("sessions").join(&sid).exists(),
         "an outside-cwd first call must not back-fill a (wrong) global pointer"

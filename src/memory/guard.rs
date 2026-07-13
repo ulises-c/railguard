@@ -238,11 +238,9 @@ fn is_memory_delete_command(cmd: &str) -> bool {
 
 /// Extract the memory directory from a memory file path.
 fn extract_memory_dir(file_path: &str) -> Option<String> {
-    if let Some(idx) = file_path.rfind("/memory/") {
-        Some(file_path[..idx + 8].to_string())
-    } else {
-        None
-    }
+    file_path
+        .rfind("/memory/")
+        .map(|idx| file_path[..idx + 8].to_string())
 }
 
 /// Shorten a path for display by showing just the relevant parts.
@@ -289,9 +287,7 @@ mod tests {
     #[test]
     fn test_not_memory_path() {
         assert!(!is_memory_path("/tmp/some_file.md"));
-        assert!(!is_memory_path(
-            "/Users/test/.claude/settings.json"
-        ));
+        assert!(!is_memory_path("/Users/test/.claude/settings.json"));
         assert!(!is_memory_path(
             "/Users/test/.claude/projects/-Users-test/CLAUDE.md"
         ));
@@ -323,8 +319,14 @@ mod tests {
             "content": "The API key is sk-ant-abc123def456ghi789jkl012mno345pqr"
         });
 
-        let decision =
-            check_memory_write(&config, "Write", "/tmp/memory/secret.md", &tool_input, "s1", cwd);
+        let decision = check_memory_write(
+            &config,
+            "Write",
+            "/tmp/memory/secret.md",
+            &tool_input,
+            "s1",
+            cwd,
+        );
         assert!(matches!(decision, MemoryDecision::Block(_)));
     }
 
@@ -377,8 +379,14 @@ mod tests {
             "command": "rm ~/.claude/projects/foo/memory/old.md"
         });
 
-        let decision =
-            check_memory_write(&config, "Bash", "/tmp/memory/old.md", &tool_input, "s1", cwd);
+        let decision = check_memory_write(
+            &config,
+            "Bash",
+            "/tmp/memory/old.md",
+            &tool_input,
+            "s1",
+            cwd,
+        );
         assert!(matches!(decision, MemoryDecision::Block(_)));
     }
 
@@ -394,14 +402,22 @@ mod tests {
             "content": "api_key: sk-ant-abc123def456ghi789jkl012mno345pqr"
         });
 
-        let decision =
-            check_memory_write(&config, "Write", "/tmp/memory/secret.md", &tool_input, "s1", cwd);
+        let decision = check_memory_write(
+            &config,
+            "Write",
+            "/tmp/memory/secret.md",
+            &tool_input,
+            "s1",
+            cwd,
+        );
         assert!(matches!(decision, MemoryDecision::Allow));
     }
 
     #[test]
     fn test_is_memory_delete_command() {
-        assert!(is_memory_delete_command("rm ~/.claude/projects/foo/memory/old.md"));
+        assert!(is_memory_delete_command(
+            "rm ~/.claude/projects/foo/memory/old.md"
+        ));
         assert!(is_memory_delete_command("rm -f /path/to/memory.md"));
         assert!(!is_memory_delete_command("cat /path/to/memory.md"));
     }

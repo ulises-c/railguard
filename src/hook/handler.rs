@@ -113,10 +113,7 @@ fn check_hook_integrity() -> Option<HookOutput> {
     let content = std::fs::read_to_string(&settings_path).ok()?;
     let settings: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-    let hooks = match settings.get("hooks").and_then(|h| h.as_object()) {
-        Some(h) => h,
-        None => return None, // No hooks section — not installed, not tampered
-    };
+    let hooks = settings.get("hooks").and_then(|h| h.as_object())?;
 
     // If hooks is empty, not installed yet — not tampered
     if hooks.is_empty() {

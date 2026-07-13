@@ -29,17 +29,18 @@ pub fn generate_context(
     let total_calls = traces.len();
     let blocked = traces.iter().filter(|t| t.decision == "block").count();
     let approved = traces.iter().filter(|t| t.decision == "approve").count();
-    let files_touched: std::collections::HashSet<&str> = snapshots
-        .iter()
-        .map(|s| s.file_path.as_str())
-        .collect();
+    let files_touched: std::collections::HashSet<&str> =
+        snapshots.iter().map(|s| s.file_path.as_str()).collect();
 
     out.push_str("## Summary\n\n");
     out.push_str(&format!("- **Tool calls:** {}\n", total_calls));
     out.push_str(&format!("- **Blocked:** {}\n", blocked));
     out.push_str(&format!("- **Approved (human sign-off):** {}\n", approved));
     out.push_str(&format!("- **Files modified:** {}\n", files_touched.len()));
-    out.push_str(&format!("- **Snapshots available:** {}\n\n", snapshots.len()));
+    out.push_str(&format!(
+        "- **Snapshots available:** {}\n\n",
+        snapshots.len()
+    ));
 
     // File change summary with diffs
     if !snapshots.is_empty() {
@@ -49,10 +50,7 @@ pub fn generate_context(
         let mut file_history: std::collections::BTreeMap<&str, Vec<&SnapshotEntry>> =
             std::collections::BTreeMap::new();
         for snap in &snapshots {
-            file_history
-                .entry(&snap.file_path)
-                .or_default()
-                .push(snap);
+            file_history.entry(&snap.file_path).or_default().push(snap);
         }
 
         for (file_path, snaps) in &file_history {
@@ -82,9 +80,7 @@ pub fn generate_context(
                 }
             } else {
                 // Show a brief summary
-                let current_size = fs::metadata(file_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let current_size = fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
                 let original_size = if first.existed {
                     get_snapshot_size(snapshot_dir, session_id, &first.hash)
                 } else {
@@ -100,7 +96,10 @@ pub fn generate_context(
                     "unchanged size".to_string()
                 };
 
-                out.push_str(&format!("  Original: {} bytes → Current: {} bytes ({})\n\n", original_size, current_size, delta_str));
+                out.push_str(&format!(
+                    "  Original: {} bytes → Current: {} bytes ({})\n\n",
+                    original_size, current_size, delta_str
+                ));
             }
 
             // Edit timeline
@@ -124,10 +123,8 @@ pub fn generate_context(
     }
 
     // Blocked commands (important context for understanding what went wrong)
-    let blocked_traces: Vec<&TraceEntry> = traces
-        .iter()
-        .filter(|t| t.decision == "block")
-        .collect();
+    let blocked_traces: Vec<&TraceEntry> =
+        traces.iter().filter(|t| t.decision == "block").collect();
 
     if !blocked_traces.is_empty() {
         out.push_str("## Blocked Commands\n\n");
@@ -145,7 +142,11 @@ pub fn generate_context(
     if !traces.is_empty() {
         out.push_str("## Recent Timeline\n\n");
         out.push_str("```\n");
-        let start = if traces.len() > 20 { traces.len() - 20 } else { 0 };
+        let start = if traces.len() > 20 {
+            traces.len() - 20
+        } else {
+            0
+        };
         for t in &traces[start..] {
             out.push_str(&format!("{}\n", logger::format_trace_entry(t)));
         }
@@ -175,7 +176,11 @@ pub fn generate_context(
         // List specific snapshot IDs
         out.push_str("# Restore a specific snapshot\n");
         for snap in &snapshots {
-            let state = if snap.existed { "before edit" } else { "before creation" };
+            let state = if snap.existed {
+                "before edit"
+            } else {
+                "before creation"
+            };
             out.push_str(&format!(
                 "railguard rollback --session {} --id {}   # {} — {}\n",
                 session_id, snap.id, snap.file_path, state
@@ -222,15 +227,16 @@ fn compute_diff(
 
     // Limit diff output to avoid overwhelming the context
     let max_lines = 100;
-    let mut line_count = 0;
-    for change in &changes {
+    for (line_count, change) in changes.iter().enumerate() {
         if line_count >= max_lines {
-            diff.push_str(&format!("\n... ({} more lines)\n", changes.len() - line_count));
+            diff.push_str(&format!(
+                "\n... ({} more lines)\n",
+                changes.len() - line_count
+            ));
             break;
         }
         diff.push_str(change);
         diff.push('\n');
-        line_count += 1;
     }
 
     Some(diff)
@@ -255,33 +261,27 @@ fn simple_diff(original: &[&str], current: &[&str]) -> Vec<String> {
 
         // Look ahead in current for a match with original[i]
         if i < original.len() {
-            for k in j..std::cmp::min(j + 5, current.len()) {
-                if current[k] == original[i] {
-                    // Lines j..k are additions
-                    for line in &current[j..k] {
-                        changes.push(format!("+ {}", line));
-                    }
-                    j = k;
-                    found = true;
-                    break;
+            let end = std::cmp::min(j + 5, current.len());
+            if let Some(k) = (j..end).find(|&k| current[k] == original[i]) {
+                // Lines j..k are additions
+                for line in &current[j..k] {
+                    changes.push(format!("+ {}", line));
                 }
+                j = k;
+                found = true;
             }
         }
 
-        if !found {
+        if !found && j < current.len() {
             // Look ahead in original for a match with current[j]
-            if j < current.len() {
-                for k in i..std::cmp::min(i + 5, original.len()) {
-                    if original[k] == current[j] {
-                        // Lines i..k are removals
-                        for line in &original[i..k] {
-                            changes.push(format!("- {}", line));
-                        }
-                        i = k;
-                        found = true;
-                        break;
-                    }
+            let end = std::cmp::min(i + 5, original.len());
+            if let Some(k) = (i..end).find(|&k| original[k] == current[j]) {
+                // Lines i..k are removals
+                for line in &original[i..k] {
+                    changes.push(format!("- {}", line));
                 }
+                i = k;
+                found = true;
             }
         }
 
@@ -332,7 +332,10 @@ pub fn show_diff(
         .collect();
 
     if originals.is_empty() {
-        return Err(format!("No snapshots found for file '{}'", file_path.unwrap_or("")));
+        return Err(format!(
+            "No snapshots found for file '{}'",
+            file_path.unwrap_or("")
+        ));
     }
 
     for snap in &originals {
@@ -350,12 +353,7 @@ pub fn show_diff(
 }
 
 /// Print context to stdout for the user / Claude Code.
-pub fn print_context(
-    trace_dir: &Path,
-    snapshot_dir: &Path,
-    session_id: &str,
-    verbose: bool,
-) {
+pub fn print_context(trace_dir: &Path, snapshot_dir: &Path, session_id: &str, verbose: bool) {
     match generate_context(trace_dir, snapshot_dir, session_id, verbose) {
         Ok(context) => println!("{}", context),
         Err(e) => eprintln!("  {} {}", "✗".red().bold(), e),
@@ -363,11 +361,7 @@ pub fn print_context(
 }
 
 /// Print diff to stdout.
-pub fn print_diff(
-    snapshot_dir: &Path,
-    session_id: &str,
-    file_path: Option<&str>,
-) {
+pub fn print_diff(snapshot_dir: &Path, session_id: &str, file_path: Option<&str>) {
     match show_diff(snapshot_dir, session_id, file_path) {
         Ok(diff) => println!("{}", diff),
         Err(e) => eprintln!("  {} {}", "✗".red().bold(), e),

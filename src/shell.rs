@@ -1,11 +1,11 @@
-/// railguard-shell: A POSIX shell shim that wraps every command in an OS sandbox.
-///
-/// Claude Code calls this as its shell (via CLAUDE_CODE_SHELL env var).
-/// Every `Bash` tool call runs: railguard-shell -c "command"
-/// Which becomes: sandbox-exec -f profile.sb -- /bin/sh -c "command"
-///
-/// The user never changes their workflow. They type `claude` as normal.
-/// Every shell command is kernel-sandboxed transparently.
+//! railguard-shell: A POSIX shell shim that wraps every command in an OS sandbox.
+//!
+//! Claude Code calls this as its shell (via CLAUDE_CODE_SHELL env var).
+//! Every `Bash` tool call runs: railguard-shell -c "command"
+//! Which becomes: sandbox-exec -f profile.sb -- /bin/sh -c "command"
+//!
+//! The user never changes their workflow. They type `claude` as normal.
+//! Every shell command is kernel-sandboxed transparently.
 
 use std::env;
 use std::path::Path;
@@ -84,11 +84,7 @@ fn parse_shell_args(args: &[String]) -> Option<String> {
 }
 
 /// Execute command inside macOS sandbox-exec.
-fn exec_macos_sandbox(
-    fence: &railguard::types::FenceConfig,
-    cwd: &str,
-    command: &str,
-) -> ExitCode {
+fn exec_macos_sandbox(fence: &railguard::types::FenceConfig, cwd: &str, command: &str) -> ExitCode {
     let profile = macos::generate_profile(fence, cwd);
 
     // Write profile to a temp file inside .railguard/
@@ -139,11 +135,7 @@ fn exec_macos_sandbox(
 }
 
 /// Execute command inside Linux bubblewrap sandbox.
-fn exec_linux_sandbox(
-    fence: &railguard::types::FenceConfig,
-    cwd: &str,
-    command: &str,
-) -> ExitCode {
+fn exec_linux_sandbox(fence: &railguard::types::FenceConfig, cwd: &str, command: &str) -> ExitCode {
     // Check if bwrap is available
     let bwrap_check = Command::new("which").arg("bwrap").output();
     if bwrap_check.map(|o| o.status.success()).unwrap_or(false) {
@@ -185,14 +177,14 @@ fn exec_linux_sandbox(
                 } else {
                     denied.clone()
                 };
-                if !expanded.contains("/.ssh") && !expanded.contains("/.aws") && !expanded.contains("/.gnupg") {
+                if !expanded.contains("/.ssh")
+                    && !expanded.contains("/.aws")
+                    && !expanded.contains("/.gnupg")
+                {
                     cmd.args(["--tmpfs", &expanded]);
                 }
             }
-            cmd.arg("--")
-                .arg("/bin/sh")
-                .arg("-c")
-                .arg(command);
+            cmd.arg("--").arg("/bin/sh").arg("-c").arg(command);
             cmd.env("RAILGUARD_SANDBOXED", "1");
 
             let err = cmd.exec();
@@ -210,10 +202,7 @@ fn exec_bare_command(command: &str) -> ExitCode {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let err = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(command)
-            .exec();
+        let err = Command::new("/bin/sh").arg("-c").arg(command).exec();
         eprintln!("railguard-shell: exec failed: {}", err);
         ExitCode::from(127)
     }

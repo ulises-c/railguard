@@ -59,19 +59,14 @@ fn classify_behavioral_override_railguard() {
 #[test]
 fn classify_factual_project_info() {
     let content = "---\nname: project-stack\ndescription: Tech stack info\ntype: project\n---\n\nThis project uses:\n- PostgreSQL 15\n- Redis for caching\n- Next.js 14 frontend";
-    assert_eq!(
-        classifier::classify(content),
-        MemoryClassification::Factual
-    );
+    assert_eq!(classifier::classify(content), MemoryClassification::Factual);
 }
 
 #[test]
 fn classify_factual_user_role() {
-    let content = "---\nname: user-info\ntype: user\n---\n\nSenior backend engineer, 10 years Go experience.";
-    assert_eq!(
-        classifier::classify(content),
-        MemoryClassification::Factual
-    );
+    let content =
+        "---\nname: user-info\ntype: user\n---\n\nSenior backend engineer, 10 years Go experience.";
+    assert_eq!(classifier::classify(content), MemoryClassification::Factual);
 }
 
 // ── Guard Tests (full flow) ──
@@ -342,8 +337,15 @@ fn provenance_tracks_human_approval() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path();
 
-    let entry =
-        provenance::sign(cwd, "session-1", "/tmp/mem.md", "content", "behavioral", true).unwrap();
+    let entry = provenance::sign(
+        cwd,
+        "session-1",
+        "/tmp/mem.md",
+        "content",
+        "behavioral",
+        true,
+    )
+    .unwrap();
     assert!(entry.human_approved);
     assert_eq!(entry.provenance, "human-confirmed");
 }
@@ -474,7 +476,11 @@ fn attack_tamper_existing_memory() {
     let memory_dir = dir.path().join("memory");
     std::fs::create_dir_all(&memory_dir).unwrap();
     let existing = memory_dir.join("trusted.md");
-    std::fs::write(&existing, "---\nname: trusted\ntype: project\n---\nOriginal trusted content.").unwrap();
+    std::fs::write(
+        &existing,
+        "---\nname: trusted\ntype: project\n---\nOriginal trusted content.",
+    )
+    .unwrap();
 
     let file_path = existing.display().to_string();
     let tool_input = serde_json::json!({

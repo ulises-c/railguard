@@ -57,7 +57,11 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
     // a long-running session's anchor.
     if root_source.is_trustworthy() {
         state.project_root.get_or_insert_with(|| fence_root.clone());
-        SessionState::write_global_pointer(&sessions_dir, &input.session_id, Path::new(&fence_root));
+        SessionState::write_global_pointer(
+            &sessions_dir,
+            &input.session_id,
+            Path::new(&fence_root),
+        );
     }
 
     // If session was previously terminated, ask user before resuming
@@ -120,8 +124,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             if state.is_approved(&pattern_key) {
                 // User already approved this pattern this session — allow
                 log_decision(
-                    input, policy, tool_name, &tool_input,
-                    "allow", Some("session-approved"), start,
+                    input,
+                    policy,
+                    tool_name,
+                    &tool_input,
+                    "allow",
+                    Some("session-approved"),
+                    start,
                 );
                 let _ = state.save(&state_dir);
                 return PreToolResult {
@@ -160,8 +169,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
 
                     if state.is_approved(&pattern_key) {
                         log_decision(
-                            input, policy, tool_name, &tool_input,
-                            "allow", Some("session-approved"), start,
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "allow",
+                            Some("session-approved"),
+                            start,
                         );
                         let _ = state.save(&state_dir);
                         let _ = state.save(&state_dir);
@@ -200,8 +214,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
 
                     if state.is_approved(&pattern_key) {
                         log_decision(
-                            input, policy, tool_name, &tool_input,
-                            "allow", Some("session-approved"), start,
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "allow",
+                            Some("session-approved"),
+                            start,
                         );
                         let _ = state.save(&state_dir);
                         return PreToolResult {
@@ -235,8 +254,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         // First occurrence: warn and continue to policy evaluation
                         state.record_warning();
                         log_decision(
-                            input, policy, tool_name, &tool_input,
-                            "warn", Some(&pattern_key), start,
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "warn",
+                            Some(&pattern_key),
+                            start,
                         );
                     }
                 }
@@ -261,8 +285,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                     paths.into_iter().find(|p| memory_guard::is_memory_path(p))
                 })
         } else {
-            extract_file_path(tool_name, &tool_input)
-                .filter(|p| memory_guard::is_memory_path(p))
+            extract_file_path(tool_name, &tool_input).filter(|p| memory_guard::is_memory_path(p))
         };
 
         if let Some(ref mem_path) = memory_file_path {
@@ -278,8 +301,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 MemoryDecision::Allow => {
                     // Memory guard approved — skip path fence for this path
                     log_decision(
-                        input, policy, tool_name, &tool_input, "allow",
-                        Some("memory-guard"), start,
+                        input,
+                        policy,
+                        tool_name,
+                        &tool_input,
+                        "allow",
+                        Some("memory-guard"),
+                        start,
                     );
                     let _ = state.save(&state_dir);
 
@@ -287,14 +315,21 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                     if policy.snapshot.enabled
                         && policy.snapshot.tools.iter().any(|t| t == tool_name)
                     {
-                        if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
+                        if let Some(file_path) =
+                            tool_input.get("file_path").and_then(|v| v.as_str())
+                        {
                             // Anchor snapshots at the stable fence_root, not the
                             // per-call cwd: `railguard rollback` reads them from
                             // the project root, so a cwd-drifted Write/Edit's
                             // backup must still land under the project.
                             let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
                             let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
-                            let _ = capture_snapshot(&snap_dir, &input.session_id, tool_use_id, file_path);
+                            let _ = capture_snapshot(
+                                &snap_dir,
+                                &input.session_id,
+                                tool_use_id,
+                                file_path,
+                            );
                         }
                     }
 
@@ -306,8 +341,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 MemoryDecision::Block(reason) => {
                     let _ = state.save(&state_dir);
                     log_decision(
-                        input, policy, tool_name, &tool_input, "block",
-                        Some("memory-guard"), start,
+                        input,
+                        policy,
+                        tool_name,
+                        &tool_input,
+                        "block",
+                        Some("memory-guard"),
+                        start,
                     );
                     return PreToolResult {
                         output: HookOutput::deny(&format!("⛔ Railguard: {}", reason)),
@@ -317,8 +357,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 MemoryDecision::Approve(reason) => {
                     let _ = state.save(&state_dir);
                     log_decision(
-                        input, policy, tool_name, &tool_input, "approve",
-                        Some("memory-guard"), start,
+                        input,
+                        policy,
+                        tool_name,
+                        &tool_input,
+                        "approve",
+                        Some("memory-guard"),
+                        start,
                     );
                     return PreToolResult {
                         output: HookOutput::ask(&format!(
@@ -349,8 +394,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         state.record_block(cmd, "path-fence", keywords, 0);
                         let _ = state.save(&state_dir);
                         log_decision(
-                            input, policy, tool_name, &tool_input, "block",
-                            Some("path-fence"), start,
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "block",
+                            Some("path-fence"),
+                            start,
                         );
                         return PreToolResult {
                             output: HookOutput::deny(&reason),
@@ -363,8 +413,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         } else {
                             let _ = state.save(&state_dir);
                             log_decision(
-                                input, policy, tool_name, &tool_input, "approve",
-                                Some("path-fence"), start,
+                                input,
+                                policy,
+                                tool_name,
+                                &tool_input,
+                                "approve",
+                                Some("path-fence"),
+                                start,
                             );
                             return PreToolResult {
                                 output: HookOutput::ask(&format!(
@@ -389,8 +444,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             PathCheck::Denied(reason) => {
                 let _ = state.save(&state_dir);
                 log_decision(
-                    input, policy, tool_name, &tool_input, "block",
-                    Some("path-fence"), start,
+                    input,
+                    policy,
+                    tool_name,
+                    &tool_input,
+                    "block",
+                    Some("path-fence"),
+                    start,
                 );
                 return PreToolResult {
                     output: HookOutput::deny(&reason),
@@ -403,8 +463,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 } else {
                     let _ = state.save(&state_dir);
                     log_decision(
-                        input, policy, tool_name, &tool_input, "approve",
-                        Some("path-fence"), start,
+                        input,
+                        policy,
+                        tool_name,
+                        &tool_input,
+                        "approve",
+                        Some("path-fence"),
+                        start,
                     );
                     return PreToolResult {
                         output: HookOutput::ask(&format!(
@@ -431,8 +496,18 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             // Coordination: acquire file lock for Write/Edit
             if matches!(tool_name, "Write" | "Edit") {
                 if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-                    if let Some(deny_msg) = crate::coord::context::check_file_conflict(file_path, &input.session_id) {
-                        log_decision(input, policy, tool_name, &tool_input, "block", Some("file-lock"), start);
+                    if let Some(deny_msg) =
+                        crate::coord::context::check_file_conflict(file_path, &input.session_id)
+                    {
+                        log_decision(
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "block",
+                            Some("file-lock"),
+                            start,
+                        );
                         let _ = state.save(&state_dir);
                         return PreToolResult {
                             output: HookOutput::deny(&deny_msg),
@@ -443,9 +518,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             }
 
             // Snapshot before Write/Edit (if enabled)
-            if policy.snapshot.enabled
-                && policy.snapshot.tools.iter().any(|t| t == tool_name)
-            {
+            if policy.snapshot.enabled && policy.snapshot.tools.iter().any(|t| t == tool_name) {
                 if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
                     // Anchor snapshots at the stable fence_root (see above): keeps
                     // backups under the project root that `railguard rollback` reads.
@@ -455,7 +528,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         capture_snapshot(&snap_dir, &input.session_id, tool_use_id, file_path)
                     {
                         // silently ignore — stderr causes "hook error" in Claude Code
-let _ = e;
+                        let _ = e;
                     }
                 }
             }
@@ -475,7 +548,13 @@ let _ = e;
             }
             let _ = state.save(&state_dir);
             log_decision(
-                input, policy, tool_name, &tool_input, "block", Some(rule), start,
+                input,
+                policy,
+                tool_name,
+                &tool_input,
+                "block",
+                Some(rule),
+                start,
             );
             PreToolResult {
                 output: HookOutput::deny(&format!("⛔ Railguard BLOCKED: {}", message)),
@@ -489,7 +568,13 @@ let _ = e;
             // Tier 3 triggers on legitimate repeated commands (e.g. fly ssh).
             let _ = state.save(&state_dir);
             log_decision(
-                input, policy, tool_name, &tool_input, "approve", Some(rule), start,
+                input,
+                policy,
+                tool_name,
+                &tool_input,
+                "approve",
+                Some(rule),
+                start,
             );
             PreToolResult {
                 output: HookOutput::ask(&format!(
@@ -578,21 +663,66 @@ fn is_read_only_command(cmd: &str) -> bool {
     // `python -c "print(1)"` vs `python -c "open(p,'w')"`), so they must keep
     // prompting when they name a path outside the project. Do not re-add them.
     const READ_ONLY_COMMANDS: &[&str] = &[
-        "find", "ls", "cat", "head", "tail", "less", "more", "wc",
-        "file", "stat", "du", "df", "which", "whereis", "type",
-        "grep", "rg", "ag", "ack", "fd", "tree", "realpath",
-        "readlink", "basename", "dirname", "diff", "md5", "shasum",
-        "sha256sum", "md5sum", "xxd", "hexdump", "strings",
-        "jq", "yq", "sort", "uniq", "tr", "cut", "awk",
-        "sed", "pwd", "env", "printenv", "uname", "whoami", "id",
-        "date", "cal", "echo", "printf", "test", "[",
+        "find",
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "wc",
+        "file",
+        "stat",
+        "du",
+        "df",
+        "which",
+        "whereis",
+        "type",
+        "grep",
+        "rg",
+        "ag",
+        "ack",
+        "fd",
+        "tree",
+        "realpath",
+        "readlink",
+        "basename",
+        "dirname",
+        "diff",
+        "md5",
+        "shasum",
+        "sha256sum",
+        "md5sum",
+        "xxd",
+        "hexdump",
+        "strings",
+        "jq",
+        "yq",
+        "sort",
+        "uniq",
+        "tr",
+        "cut",
+        "awk",
+        "sed",
+        "pwd",
+        "env",
+        "printenv",
+        "uname",
+        "whoami",
+        "id",
+        "date",
+        "cal",
+        "echo",
+        "printf",
+        "test",
+        "[",
     ];
 
     // Every segment of a compound command (`&&`, `||`, `;`, `|`) must itself be
     // read-only. `cd`/`pushd`/`popd` are navigation and don't disqualify.
     // (Split is connector-naive; a connector char inside a quoted program at
     // worst yields a non-read-only verdict — more fencing, never less.)
-    cmd.split(|c: char| c == ';' || c == '|' || c == '&')
+    cmd.split([';', '|', '&'])
         .map(str::trim)
         .filter(|seg| !seg.is_empty())
         .all(|seg| {

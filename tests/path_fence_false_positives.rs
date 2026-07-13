@@ -102,9 +102,15 @@ const BENIGN: &[(&str, &str)] = &[
     ("jq after cd", r#"cd sub && jq '.a // 0' data.json"#),
     // ── sed / awk regex addresses — `/fn`, `/struct`, `/^}/` look like paths ──
     ("sed address", r#"sed -n '/fn main/,/^}/p' src/lib.rs"#),
-    ("sed after cd", r#"cd src && sed -n '/struct Config/p' lib.rs"#),
+    (
+        "sed after cd",
+        r#"cd src && sed -n '/struct Config/p' lib.rs"#,
+    ),
     ("sed substitution", r#"sed 's/foo/bar/g' notes.txt"#),
-    ("awk regex + division", r#"awk '/^Total/ {print $2/$3}' report.txt"#),
+    (
+        "awk regex + division",
+        r#"awk '/^Total/ {print $2/$3}' report.txt"#,
+    ),
     // ── arithmetic / ratios — division slashes ──
     ("arithmetic echo", r#"echo $((100 / 4))"#),
     ("ratio printf", r#"printf 'aspect %s\n' "16/9""#),
@@ -112,7 +118,10 @@ const BENIGN: &[(&str, &str)] = &[
     ("curl url", r#"curl -s https://example.com/api/v1/status"#),
     ("git clone url after cd", r#"cd repo && git remote -v"#),
     // ── regex patterns mentioning slash tokens (no real target) ──
-    ("grep slash pattern", r#"grep -nE '/api/v[0-9]+' routes.txt"#),
+    (
+        "grep slash pattern",
+        r#"grep -nE '/api/v[0-9]+' routes.txt"#,
+    ),
     ("rg slash pattern", r#"rg -n 'TODO//FIXME' src"#),
     // ── ordinary read-only inspection, with and without a cd prefix ──
     ("git log", r#"git log --oneline -5"#),
@@ -121,19 +130,43 @@ const BENIGN: &[(&str, &str)] = &[
     ("ls after cd", r#"cd src && ls -la"#),
     ("cat relative", r#"cat README.md"#),
     // ── compound / piped read-only chains (every segment must be read-only) ──
-    ("multi cd then sed", r#"cd a && cd b && sed -n '/fn /p' f.rs"#),
-    ("piped read-only with jq", r#"cat data.json | jq '.x // empty' | sort"#),
-    ("pushd grep popd", r#"pushd src && grep -rn '/v1/' . && popd"#),
-    ("cd chain to awk", r#"cd src && awk -F/ '{print $2}' paths.txt"#),
+    (
+        "multi cd then sed",
+        r#"cd a && cd b && sed -n '/fn /p' f.rs"#,
+    ),
+    (
+        "piped read-only with jq",
+        r#"cat data.json | jq '.x // empty' | sort"#,
+    ),
+    (
+        "pushd grep popd",
+        r#"pushd src && grep -rn '/v1/' . && popd"#,
+    ),
+    (
+        "cd chain to awk",
+        r#"cd src && awk -F/ '{print $2}' paths.txt"#,
+    ),
     // ── issue #17: path-shaped text in data positions (never accessed) ──
-    ("sed conflict markers", r#"sed -n '/<<<<<<< /,/>>>>>>> /p' file.rs"#),
-    ("file url with variable", r#"curl -s file://$PWD/fixtures/data.json"#),
+    (
+        "sed conflict markers",
+        r#"sed -n '/<<<<<<< /,/>>>>>>> /p' file.rs"#,
+    ),
+    (
+        "file url with variable",
+        r#"curl -s file://$PWD/fixtures/data.json"#,
+    ),
     (
         "commit msg mentions path",
         r#"git commit -m "docs: update ~/.claude/docs/RAILGUARD.md notes""#,
     ),
-    ("commit msg slash token", r#"git commit -m "ran /verify and it passed""#),
-    ("commit msg bare path", r#"git commit -m "~/.claude/docs/RAILGUARD.md""#),
+    (
+        "commit msg slash token",
+        r#"git commit -m "ran /verify and it passed""#,
+    ),
+    (
+        "commit msg bare path",
+        r#"git commit -m "~/.claude/docs/RAILGUARD.md""#,
+    ),
     (
         "heredoc doc text",
         "cat <<EOF\nSee /verify and ~/.claude/docs for details\nEOF",
@@ -172,9 +205,15 @@ fn benign_commands_are_not_path_fenced() {
 /// expected decision is the OutsideProject approval prompt.
 const WRITE_CAPABLE_OUTSIDE: &[(&str, &str)] = &[
     ("git -C outside", r#"git -C ~/other-repo log --oneline"#),
-    ("cd outside then python", r#"cd ~/scratch && python build.py"#),
+    (
+        "cd outside then python",
+        r#"cd ~/scratch && python build.py"#,
+    ),
     ("node outside script", r#"node ~/outside/app.js"#),
-    ("cargo manifest outside", r#"cargo build --manifest-path ~/other/Cargo.toml"#),
+    (
+        "cargo manifest outside",
+        r#"cargo build --manifest-path ~/other/Cargo.toml"#,
+    ),
     ("npm prefix outside", r#"npm install --prefix ~/other/pkg"#),
     ("ruby outside script", r#"ruby ~/scratch/gen.rb"#),
     // issue #17: executable payloads and operands must still be fenced even

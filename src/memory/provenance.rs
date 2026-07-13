@@ -75,10 +75,11 @@ pub fn load_entries(cwd: &Path) -> Vec<MemoryEntry> {
     let reader = std::io::BufReader::new(file);
     let mut entries = Vec::new();
     for line in reader.lines() {
-        if let Ok(line) = line {
-            if let Ok(entry) = serde_json::from_str::<MemoryEntry>(&line) {
-                entries.push(entry);
-            }
+        // Skip unreadable lines (e.g. a corrupt partial write) instead of
+        // truncating the log there — later entries must stay visible.
+        let Ok(line) = line else { continue };
+        if let Ok(entry) = serde_json::from_str::<MemoryEntry>(&line) {
+            entries.push(entry);
         }
     }
     entries
@@ -87,10 +88,7 @@ pub fn load_entries(cwd: &Path) -> Vec<MemoryEntry> {
 /// Get the latest provenance entry for a given file path.
 pub fn latest_entry_for_file(cwd: &Path, file_path: &str) -> Option<MemoryEntry> {
     let entries = load_entries(cwd);
-    entries
-        .into_iter()
-        .filter(|e| e.file_path == file_path)
-        .last()
+    entries.into_iter().rfind(|e| e.file_path == file_path)
 }
 
 /// Verify integrity of all memory files.
@@ -108,11 +106,7 @@ pub fn verify_all(cwd: &Path, memory_dir: &Path) -> Vec<(String, String)> {
         let file_path = entry.display().to_string();
 
         // Skip MEMORY.md index file
-        if entry
-            .file_name()
-            .map(|f| f == "MEMORY.md")
-            .unwrap_or(false)
-        {
+        if entry.file_name().map(|f| f == "MEMORY.md").unwrap_or(false) {
             continue;
         }
 
@@ -126,10 +120,7 @@ pub fn verify_all(cwd: &Path, memory_dir: &Path) -> Vec<(String, String)> {
         match latest_entry_for_file(cwd, &file_path) {
             Some(prov_entry) => {
                 if prov_entry.content_hash != current_hash {
-                    issues.push((
-                        file_path,
-                        "modified outside guarded session".to_string(),
-                    ));
+                    issues.push((file_path, "modified outside guarded session".to_string()));
                 }
             }
             None => {
@@ -149,7 +140,7 @@ mod tests {
     fn test_hash_content() {
         let hash = hash_content("hello world");
         assert_eq!(hash.len(), 64); // SHA256 hex is 64 chars
-        // Same content should produce same hash
+                                    // Same content should produce same hash
         assert_eq!(hash, hash_content("hello world"));
         // Different content should produce different hash
         assert_ne!(hash, hash_content("hello world!"));

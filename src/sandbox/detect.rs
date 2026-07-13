@@ -34,7 +34,7 @@ fn check_sandbox_exec() -> bool {
     std::process::Command::new("sandbox-exec")
         .arg("-n")
         .arg("no-network") // Built-in profile, harmless test
-        .arg("true")       // Command that does nothing
+        .arg("true") // Command that does nothing
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

@@ -3,11 +3,7 @@ use crate::types::{Decision, Policy};
 
 /// Evaluate a tool call against the full policy.
 /// Order: allowlist → blocklist → approve → default allow.
-pub fn evaluate(
-    policy: &Policy,
-    tool_name: &str,
-    tool_input: &serde_json::Value,
-) -> Decision {
+pub fn evaluate(policy: &Policy, tool_name: &str, tool_input: &serde_json::Value) -> Decision {
     // 1. Check allowlist first — if explicitly allowed, skip everything
     if !policy.allowlist.is_empty() {
         let applicable: Vec<_> = policy
@@ -50,7 +46,7 @@ pub fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Rule, Policy};
+    use crate::types::{Policy, Rule};
     use serde_json::json;
 
     fn test_policy() -> Policy {

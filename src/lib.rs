@@ -1,8 +1,8 @@
 pub mod block;
-pub mod coord;
-pub mod dashboard;
 pub mod configure;
 pub mod context;
+pub mod coord;
+pub mod dashboard;
 pub mod fence;
 pub mod hook;
 pub mod install;
