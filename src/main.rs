@@ -29,6 +29,9 @@ enum Commands {
     /// Generate a starter railguard.yaml in the current directory
     Init,
 
+    /// Print the full agent guide (rollback, policy layers, quirks)
+    Guide,
+
     /// Internal: handle a hook event (reads JSON from stdin)
     Hook {
         #[arg(long)]
@@ -161,6 +164,7 @@ fn main() {
         Some(Commands::Install) => cmd_install(),
         Some(Commands::Uninstall) => cmd_uninstall(),
         Some(Commands::Init) => cmd_init(),
+        Some(Commands::Guide) => cmd_guide(),
         Some(Commands::Hook { event }) => hook::handler::run(&event),
         Some(Commands::Log { session, count }) => cmd_log(session, count),
         Some(Commands::Rollback {
@@ -350,6 +354,11 @@ fn cmd_init() -> i32 {
             1
         }
     }
+}
+
+fn cmd_guide() -> i32 {
+    print!("{}", include_str!("../defaults/GUIDE.md"));
+    0
 }
 
 fn cmd_log(session: Option<String>, count: usize) -> i32 {
