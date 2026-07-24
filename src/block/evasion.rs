@@ -737,6 +737,15 @@ fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
 
 fn heredoc_body_is_code(words: &[&str]) -> bool {
     let (eff_idx, split_commands) = resolve_effective_command(words);
+    // `xargs` reads stdin itself and hands the wrapped command *arguments*, so a
+    // heredoc it consumes is argument data — never the wrapped command's script.
+    if words
+        .iter()
+        .take(eff_idx + 1)
+        .any(|word| command_basename(word) == "xargs")
+    {
+        return false;
+    }
     let split_command_reads_stdin = split_commands
         .iter()
         .any(|command| command_reads_stdin_as_code(&format!("env {command}")));

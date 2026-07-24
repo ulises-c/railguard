@@ -476,6 +476,45 @@ fn heredoc_before_program_definition_is_data() {
 }
 
 #[test]
+fn xargs_stdin_is_argument_data_not_code() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "xargs bash <<'EOF'\n\
+         note: use the b64decode helper\n\
+         EOF",
+        "xargs -n 1 bash <<'EOF'\n\
+         note: use the b64decode helper\n\
+         EOF",
+        "xargs bash <<< 'note: use the b64decode helper'",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            !output_is_not_allowed(&stdout),
+            "xargs input data was treated as code: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn xargs_inline_payload_still_scanned() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    let command = "ls | xargs bash -c \
+                   \"python3 -c \\\"import base64,os; \
+                   os.system(base64.b64decode('eA==').decode())\\\"\"";
+    let input = make_bash_input(&unique_session_id(), cwd, command);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "xargs hid an inline obfuscated payload: {command}\n{stdout}"
+    );
+}
+
+#[test]
 fn herestring_classification_uses_complete_command() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
