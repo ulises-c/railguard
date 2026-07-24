@@ -540,14 +540,13 @@ mod tests {
     fn test_resolve_cwd_fallback_is_untrustworthy() {
         // First call outside any repo: resolves to cwd but must be flagged
         // untrustworthy so the caller does not persist it as the sticky anchor.
-        let outside = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
         let (root, source) = SessionState::resolve_project_root_with_source(
-            outside.path(),
+            Path::new("/"),
             "fresh",
             sessions.path(),
         );
-        assert_eq!(root, outside.path());
+        assert_eq!(root, Path::new("/"));
         assert_eq!(source, RootSource::CwdFallback);
         assert!(!source.is_trustworthy());
     }
@@ -561,9 +560,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join(".git")).unwrap();
         let state_dir = root.path().join(".railguard/state");
         let mut state = SessionState::new("poisoned");
-        // The temp parent exists but is not a git repo — the kind of broad root
-        // (cf. "/", "/home", "/tmp") a poisoned/garbage anchor would name.
-        state.project_root = Some(root.path().parent().unwrap().display().to_string());
+        state.project_root = Some("/".to_string());
         state.save(&state_dir).unwrap();
         let sessions = tempfile::tempdir().unwrap();
 
@@ -591,8 +588,7 @@ mod tests {
     #[test]
     fn test_anchor_to_persist_only_inside_git_project() {
         // A bare cwd outside any repo is not a persistable anchor.
-        let no_git = tempfile::tempdir().unwrap();
-        assert_eq!(SessionState::anchor_to_persist(no_git.path()), None);
+        assert_eq!(SessionState::anchor_to_persist(Path::new("/")), None);
         // Inside a repo, the git root is returned (even from a subdir).
         let repo = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repo.path().join(".git")).unwrap();

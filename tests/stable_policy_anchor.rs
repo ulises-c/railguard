@@ -199,18 +199,18 @@ fn drifted_first_call_without_session_start_does_not_stick() {
     let binary = railguard_binary();
     let rg_home = tempfile::tempdir().unwrap();
     let allowed = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap(); // no .git — a bare cwd fallback
+    let outside = Path::new("/");
     let project = make_project(allowed.path());
     let sid = format!("anchor-drift-first-{}", std::process::id());
 
     // First call already outside any repo. It resolves for this call but the
     // untrustworthy cwd fallback must NOT be persisted as the session anchor.
-    let scratch = outside.path().join("scratch.txt");
+    let scratch = outside.join("scratch.txt");
     run_hook(
         &binary,
         "PreToolUse",
         rg_home.path(),
-        &write_input(outside.path(), &sid, &scratch),
+        &write_input(outside, &sid, &scratch),
     );
     assert!(
         !rg_home.path().join("sessions").join(&sid).exists(),
