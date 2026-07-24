@@ -407,6 +407,32 @@ fn heredoc_python_obfuscated_asks() {
 }
 
 #[test]
+fn interpreter_option_values_do_not_hide_heredoc_obfuscation() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "python3 -W ignore <<'PY'\n\
+         import base64, os\n\
+         os.system(base64.b64decode('eA==').decode())\n\
+         PY",
+        "bash -O extglob <<'SH'\n\
+         python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+         SH",
+        "php -c php.ini <<'PHP'\n\
+         eval(base64_decode('ZWNobyAxOw=='));\n\
+         PHP",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "interpreter option hid heredoc obfuscation: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn heredoc_data_for_python_script_allowed() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
@@ -425,21 +451,85 @@ fn heredoc_data_for_python_script_allowed() {
 }
 
 #[test]
+fn heredoc_before_program_definition_is_data() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "python3 <<'EOF' -c \"print('safe')\"\n\
+         note: use the b64decode helper\n\
+         EOF",
+        "python3 <<'EOF' helper.py\n\
+         note: use the b64decode helper\n\
+         EOF",
+        "python3 <<'EOF' 2>&1 helper.py\n\
+         note: use the b64decode helper\n\
+         EOF",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            !output_is_not_allowed(&stdout),
+            "heredoc data was treated as code: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn herestring_classification_uses_complete_command() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let cases = [
+        (
+            "python3 <<< 'note: use the b64decode helper' -c \"print('safe')\"",
+            false,
+        ),
+        (
+            "python3 -W ignore <<< \"import base64,os; \
+             os.system(base64.b64decode('eA==').decode())\"",
+            true,
+        ),
+        (
+            "env --split-string=\"bash -s\" <<< \
+             \"python3 -c \\\"import base64,os; os.system(base64.b64decode('eA==').decode())\\\"\"",
+            true,
+        ),
+    ];
+
+    for (command, should_ask) in cases {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert_eq!(
+            output_is_not_allowed(&stdout),
+            should_ask,
+            "incorrect here-string classification: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn env_split_string_shell_heredoc_obfuscation_asks() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
-    let sid = unique_session_id();
 
-    let cmd = "env -S \"bash -s\" <<'SH'\n\
-               python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
-               SH";
-    let input = make_bash_input(&sid, cwd, cmd);
-    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
-    assert!(
-        output_is_not_allowed(&stdout),
-        "env -S shell wrapper must not hide an obfuscated heredoc: {}",
-        stdout
-    );
+    for command in [
+        "env -S \"bash -s\" <<'SH'\n\
+         python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+         SH",
+        "env --split-string=\"bash -s\" <<'SH'\n\
+         python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+         SH",
+        "env --split-string=\"-u FOO bash -s\" <<'SH'\n\
+         python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+         SH",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "env split-string hid an obfuscated heredoc: {command}\n{stdout}"
+        );
+    }
 }
 
 #[test]

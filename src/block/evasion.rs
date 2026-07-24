@@ -471,37 +471,40 @@ fn collect_payloads_from_segment(
     }
     let (eff_idx, split_commands) = resolve_effective_command(&words);
     for command in split_commands {
-        collect_interpreter_payloads(command, depth + 1, payloads);
+        collect_interpreter_payloads(&format!("env {command}"), depth + 1, payloads);
     }
     let eff = words
         .get(eff_idx)
         .map(|w| command_basename(w))
         .unwrap_or("");
-    if !is_shell_or_interpreter(eff) {
+    let stdin_is_code = heredoc_body_is_code(&words);
+    if !is_shell_or_interpreter(eff) && !stdin_is_code {
         return;
     }
 
-    // Once the interpreter's program is defined (a script file operand or a
-    // `-c`/`-e` code arg), stdin (`<<<`/heredoc) is data the program reads, not
-    // code — so a here-string only counts as code before that point.
-    let mut program_defined = false;
-    let mut pending = false;
+    let mut pending_inline_code = false;
+    let mut pending_option_value = false;
+    let mut here_string = false;
     let mut word_no = 0usize;
     for tok in tokens {
         match tok {
-            ShellToken::Op("<<<") if !program_defined => pending = true,
-            ShellToken::Op(_) => {}
-            ShellToken::Word(w) => {
-                if std::mem::take(&mut pending) {
+            ShellToken::Op("<<<") => here_string = true,
+            ShellToken::Op(_) => here_string = false,
+            ShellToken::Redirection(w) => {
+                if std::mem::take(&mut here_string) && stdin_is_code {
                     payloads.push((PayloadKind::Inline, w.to_string()));
-                    program_defined = true;
-                } else if word_no > eff_idx {
+                }
+            }
+            ShellToken::Word(w) => {
+                if std::mem::take(&mut pending_inline_code) {
+                    payloads.push((PayloadKind::Inline, w.to_string()));
+                } else if word_no > eff_idx && !std::mem::take(&mut pending_option_value) {
                     if eff == "eval" {
                         payloads.push((PayloadKind::Inline, w.to_string()));
                     } else if is_inline_code_flag(eff, w) {
-                        pending = true;
-                    } else if !w.starts_with('-') {
-                        program_defined = true;
+                        pending_inline_code = true;
+                    } else if interpreter_option_takes_value(eff, w) {
+                        pending_option_value = true;
                     }
                 }
                 word_no += 1;
@@ -643,7 +646,7 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
     }
     let (eff_idx, split_commands) = resolve_effective_command(&words);
     for command in split_commands {
-        extract_paths_inner(command, depth + 1, paths);
+        extract_paths_inner(&format!("env {command}"), depth + 1, paths);
     }
     let eff = words
         .get(eff_idx)
@@ -651,14 +654,22 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
         .unwrap_or("");
     let is_vcs = matches!(eff, "git" | "gh");
     let is_interp = is_shell_or_interpreter(eff);
+    let stdin_is_code = heredoc_body_is_code(&words);
 
     let mut pending = NextWord::Operand;
+    let mut here_string = false;
     let mut word_no = 0usize;
     for tok in tokens {
         match tok {
-            // Here-string payloads execute only when fed to a shell/interpreter.
-            ShellToken::Op("<<<") if is_interp => pending = NextWord::Recurse,
-            ShellToken::Op(_) => {}
+            ShellToken::Op("<<<") => here_string = true,
+            ShellToken::Op(_) => here_string = false,
+            ShellToken::Redirection(w) => {
+                if std::mem::take(&mut here_string) && stdin_is_code {
+                    extract_paths_inner(w, depth + 1, paths);
+                } else {
+                    push_candidate(w, paths);
+                }
+            }
             ShellToken::Word(w) => {
                 match std::mem::replace(&mut pending, NextWord::Operand) {
                     NextWord::Recurse => extract_paths_inner(w, depth + 1, paths),
@@ -699,6 +710,11 @@ fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
         } else if is_wrapper(command) {
             wrapper = Some(command);
             idx += 1;
+        } else if let Some(split_command) =
+            env_split_string_value(w).filter(|_| wrapper == Some("env"))
+        {
+            split_commands.push(split_command);
+            idx += 1;
         } else if wrapper.is_some_and(|wrapper| wrapper_option_takes_value(wrapper, w)) {
             if wrapper == Some("env")
                 && matches!(w, "-S" | "--split-string")
@@ -723,7 +739,7 @@ fn heredoc_body_is_code(words: &[&str]) -> bool {
     let (eff_idx, split_commands) = resolve_effective_command(words);
     let split_command_reads_stdin = split_commands
         .iter()
-        .any(|command| command_reads_stdin_as_code(command));
+        .any(|command| command_reads_stdin_as_code(&format!("env {command}")));
     if split_command_reads_stdin {
         return true;
     }
@@ -750,12 +766,18 @@ fn heredoc_body_is_code(words: &[&str]) -> bool {
     }
 
     let mut pending_inline_code = false;
+    let mut pending_option_value = false;
     for word in words.iter().skip(eff_idx + 1) {
         if pending_inline_code {
             return false;
         }
+        if std::mem::take(&mut pending_option_value) {
+            continue;
+        }
         if is_inline_code_flag(eff, word) {
             pending_inline_code = true;
+        } else if interpreter_option_takes_value(eff, word) {
+            pending_option_value = true;
         } else if *word == "-"
             || (is_shell(eff)
                 && word.starts_with('-')
@@ -767,7 +789,7 @@ fn heredoc_body_is_code(words: &[&str]) -> bool {
             return false;
         }
     }
-    !pending_inline_code
+    !pending_inline_code && !pending_option_value
 }
 
 fn command_reads_stdin_as_code(command: &str) -> bool {
@@ -900,6 +922,12 @@ fn wrapper_option_takes_value(wrapper: &str, option: &str) -> bool {
         .any(|(command, options)| *command == wrapper && options.contains(&option))
 }
 
+fn env_split_string_value(option: &str) -> Option<&str> {
+    option
+        .strip_prefix("--split-string=")
+        .or_else(|| option.strip_prefix("-S").filter(|value| !value.is_empty()))
+}
+
 fn is_env_assignment(w: &str) -> bool {
     match w.find('=') {
         Some(eq) if eq > 0 => w[..eq].chars().all(|c| c.is_alphanumeric() || c == '_'),
@@ -946,31 +974,68 @@ fn is_code_flag(w: &str) -> bool {
                 .any(|c| matches!(c, 'c' | 'e' | 'E' | 'n' | 'p')))
 }
 
-/// Whether `w` is a flag that introduces an *inline code argument* for the
-/// interpreter `eff`. Unlike `is_code_flag` (used by path extraction, where
-/// over-recursion is harmless), this must be precise: a flag that takes no code
-/// (`-n`/`-p` autoloop, `sh -e` errexit, python's `-E` ignore-env) would
-/// otherwise swallow the following script filename as a bogus payload
-/// (issue #18). Shells accept `c` anywhere in a short option cluster. For other
-/// interpreters, the final letter determines whether the next word is code.
 fn is_inline_code_flag(eff: &str, w: &str) -> bool {
-    if w == "--eval" {
-        return true;
+    let is_short_option = w.len() >= 2 && w.starts_with('-') && !w.starts_with("--");
+    if is_shell(eff) {
+        return is_short_option && w[1..].contains('c');
     }
-    if w.len() < 2 || !w.starts_with('-') || w.starts_with("--") {
-        return false;
+    if eff.starts_with("python") {
+        return w == "-c";
     }
-    if is_shell(eff) && w[1..].contains('c') {
-        return true;
+    if eff.starts_with("perl") {
+        return w == "--eval" || (is_short_option && matches!(w.chars().last(), Some('e' | 'E')));
     }
-    match w.chars().last() {
-        Some('c') => true,
-        Some('e') => {
-            eff.starts_with("perl") || eff.starts_with("ruby") || matches!(eff, "node" | "nodejs")
-        }
-        Some('E') => eff.starts_with("perl"),
-        _ => false,
+    if eff.starts_with("ruby") {
+        return w == "--eval" || (is_short_option && w.ends_with('e'));
     }
+    if matches!(eff, "node" | "nodejs") {
+        return matches!(w, "--eval" | "--print")
+            || (is_short_option && matches!(w.chars().last(), Some('e' | 'p')));
+    }
+    if eff == "pwsh" {
+        return matches!(w.to_ascii_lowercase().as_str(), "-c" | "-command");
+    }
+    matches!(
+        (eff, w),
+        ("php", "-r" | "--run") | ("lua", "-e") | ("expect", "-c")
+    )
+}
+
+fn interpreter_option_takes_value(eff: &str, option: &str) -> bool {
+    if eff.starts_with("python") {
+        return matches!(option, "-W" | "-X" | "--check-hash-based-pycs");
+    }
+    if is_shell(eff) {
+        return matches!(
+            option,
+            "-O" | "+O" | "-o" | "+o" | "--init-file" | "--rcfile"
+        );
+    }
+    if eff == "php" {
+        return matches!(option, "-c" | "--php-ini" | "-d" | "--define");
+    }
+    if matches!(eff, "node" | "nodejs") {
+        return matches!(
+            option,
+            "-r" | "--require" | "--import" | "--loader" | "--input-type" | "--conditions"
+        );
+    }
+    if eff.starts_with("ruby") {
+        return matches!(option, "-I" | "-r" | "-C" | "-E" | "-F");
+    }
+    if eff == "lua" {
+        return option == "-l";
+    }
+    if eff == "tclsh" {
+        return option == "-encoding";
+    }
+    if eff == "pwsh" {
+        return matches!(
+            option.to_ascii_lowercase().as_str(),
+            "-executionpolicy" | "-workingdirectory" | "-configurationname"
+        );
+    }
+    false
 }
 
 fn is_shell(command: &str) -> bool {
@@ -1081,6 +1146,7 @@ fn is_shell_or_interpreter(cmd: &str) -> bool {
 
 enum ShellToken {
     Word(String),
+    Redirection(String),
     Op(&'static str),
 }
 
@@ -1104,11 +1170,13 @@ struct LexState {
     substitutions: Vec<String>,
     word: String,
     has_word: bool,
+    word_has_quoted_part: bool,
     segment_words: Vec<String>,
     /// Some(strip_tabs) right after a <</<<- operator: the next word is a heredoc delimiter.
     expecting_delim: Option<bool>,
+    expecting_redirection: bool,
     /// Heredocs opened on the current line: (delimiter, strip_tabs, body_is_code).
-    pending: Vec<(String, bool, bool)>,
+    pending: Vec<(String, bool, Option<bool>)>,
 }
 
 impl LexState {
@@ -1123,9 +1191,11 @@ impl LexState {
         }
         let w = std::mem::take(&mut self.word);
         self.has_word = false;
+        self.word_has_quoted_part = false;
         if let Some(strip_tabs) = self.expecting_delim.take() {
-            let body_is_code = self.current_heredoc_body_is_code();
-            self.pending.push((w, strip_tabs, body_is_code));
+            self.pending.push((w, strip_tabs, None));
+        } else if std::mem::take(&mut self.expecting_redirection) {
+            self.tokens.push(ShellToken::Redirection(w));
         } else {
             self.segment_words.push(w.clone());
             self.tokens.push(ShellToken::Word(w));
@@ -1137,18 +1207,48 @@ impl LexState {
         heredoc_body_is_code(&refs)
     }
 
+    fn finalize_pending_heredocs(&mut self) {
+        let body_is_code = self.current_heredoc_body_is_code();
+        for (_, _, classification) in &mut self.pending {
+            if classification.is_none() {
+                *classification = Some(body_is_code);
+            }
+        }
+    }
+
     fn push_op(&mut self, op: &'static str, resets_segment: bool) {
         self.flush();
         if resets_segment {
+            self.finalize_pending_heredocs();
             self.segment_words.clear();
         }
         self.tokens.push(ShellToken::Op(op));
+    }
+
+    fn push_redirection(&mut self, op: &'static str, strip_tabs: Option<bool>) {
+        if self.has_word
+            && !self.word_has_quoted_part
+            && self.word.chars().all(|c| c.is_ascii_digit())
+        {
+            self.word.clear();
+            self.has_word = false;
+        } else {
+            self.flush();
+        }
+        self.tokens.push(ShellToken::Op(op));
+        if let Some(strip_tabs) = strip_tabs {
+            self.expecting_delim = Some(strip_tabs);
+        } else {
+            self.expecting_redirection = true;
+        }
     }
 
     /// Heredoc bodies start after the line that opened them. Returns the index
     /// past the consumed bodies.
     fn consume_heredoc_bodies(&mut self, chars: &[char], mut i: usize) -> usize {
         while let Some((delim, strip_tabs, body_is_code)) = self.pending.first().cloned() {
+            let body_is_code =
+                body_is_code.expect("heredoc classification is finalized at the opener newline");
             let mut body = String::new();
             let mut found = false;
             while i < chars.len() {
@@ -1196,6 +1296,7 @@ fn tokenize_shell(text: &str) -> TokenizedCommand {
         match chars[i] {
             '\'' => {
                 lex.has_word = true;
+                lex.word_has_quoted_part = true;
                 i += 1;
                 while i < len && chars[i] != '\'' {
                     lex.word.push(chars[i]);
@@ -1205,6 +1306,7 @@ fn tokenize_shell(text: &str) -> TokenizedCommand {
             }
             '"' => {
                 lex.has_word = true;
+                lex.word_has_quoted_part = true;
                 i += 1;
                 while i < len && chars[i] != '"' {
                     if chars[i] == '\\' && i + 1 < len {
@@ -1231,6 +1333,7 @@ fn tokenize_shell(text: &str) -> TokenizedCommand {
             }
             '\\' => {
                 if i + 1 < len {
+                    lex.word_has_quoted_part = true;
                     lex.push_char(chars[i + 1]);
                 }
                 i += 2;
@@ -1246,24 +1349,35 @@ fn tokenize_shell(text: &str) -> TokenizedCommand {
             }
             '<' => {
                 if i + 2 < len && chars[i + 1] == '<' && chars[i + 2] == '<' {
-                    lex.push_op("<<<", false);
+                    lex.push_redirection("<<<", None);
                     i += 3;
                 } else if i + 1 < len && chars[i + 1] == '<' {
                     let strip_tabs = i + 2 < len && chars[i + 2] == '-';
-                    lex.push_op("<<", false);
-                    lex.expecting_delim = Some(strip_tabs);
+                    lex.push_redirection("<<", Some(strip_tabs));
                     i += if strip_tabs { 3 } else { 2 };
+                } else if i + 1 < len && chars[i + 1] == '&' {
+                    lex.push_redirection("<&", None);
+                    i += 2;
+                } else if i + 1 < len && chars[i + 1] == '>' {
+                    lex.push_redirection("<>", None);
+                    i += 2;
                 } else {
-                    lex.push_op("<", false);
+                    lex.push_redirection("<", None);
                     i += 1;
                 }
             }
             '>' => {
                 if i + 1 < len && chars[i + 1] == '>' {
-                    lex.push_op(">>", false);
+                    lex.push_redirection(">>", None);
+                    i += 2;
+                } else if i + 1 < len && chars[i + 1] == '&' {
+                    lex.push_redirection(">&", None);
+                    i += 2;
+                } else if i + 1 < len && chars[i + 1] == '|' {
+                    lex.push_redirection(">|", None);
                     i += 2;
                 } else {
-                    lex.push_op(">", false);
+                    lex.push_redirection(">", None);
                     i += 1;
                 }
             }
@@ -1277,7 +1391,13 @@ fn tokenize_shell(text: &str) -> TokenizedCommand {
                 }
             }
             '&' => {
-                if i + 1 < len && chars[i + 1] == '&' {
+                if i + 2 < len && chars[i + 1] == '>' && chars[i + 2] == '>' {
+                    lex.push_redirection("&>>", None);
+                    i += 3;
+                } else if i + 1 < len && chars[i + 1] == '>' {
+                    lex.push_redirection("&>", None);
+                    i += 2;
+                } else if i + 1 < len && chars[i + 1] == '&' {
                     lex.push_op("&&", true);
                     i += 2;
                 } else {
@@ -1316,6 +1436,7 @@ fn tokenize_shell(text: &str) -> TokenizedCommand {
         }
     }
     lex.flush();
+    lex.finalize_pending_heredocs();
 
     TokenizedCommand {
         tokens: lex.tokens,
@@ -1595,6 +1716,56 @@ mod tests {
     }
 
     #[test]
+    fn test_interpreter_option_values_do_not_hide_heredoc_payloads() {
+        for command in [
+            "python3 -W ignore <<'PY'\n\
+             import base64, os\n\
+             os.system(base64.b64decode('eA==').decode())\n\
+             PY",
+            "bash -O extglob <<'SH'\n\
+             python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+             SH",
+            "php -c php.ini <<'PHP'\n\
+             eval(base64_decode('ZWNobyAxOw=='));\n\
+             PHP",
+        ] {
+            assert!(is_interpreter_obfuscation(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn test_heredoc_before_program_definition_is_data() {
+        for command in [
+            "python3 <<'EOF' -c \"print('safe')\"\n\
+             note: use the b64decode helper\n\
+             EOF",
+            "python3 <<'EOF' helper.py\n\
+             note: use the b64decode helper\n\
+             EOF",
+            "python3 <<'EOF' 2>&1 helper.py\n\
+             note: use the b64decode helper\n\
+             EOF",
+            "python3 <<'EOF' &>output.txt helper.py\n\
+             note: use the b64decode helper\n\
+             EOF",
+            "python3 '2'>output.txt <<'EOF'\n\
+             note: use the b64decode helper\n\
+             EOF",
+        ] {
+            assert!(!is_interpreter_obfuscation(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn test_redirections_are_not_interpreter_arguments() {
+        let command = "python3 >output.txt 2>/dev/null <<'PY'\n\
+             import base64, os\n\
+             os.system(base64.b64decode('eA==').decode())\n\
+             PY";
+        assert!(is_interpreter_obfuscation(command));
+    }
+
+    #[test]
     fn test_signal_word_outside_payload_not_flagged() {
         // Signal words in data (commit messages, echoed docs) are not payloads.
         assert!(!is_interpreter_obfuscation(
@@ -1711,9 +1882,24 @@ mod tests {
     fn test_herestring_data_to_script_file_not_flagged() {
         // When the interpreter runs a script FILE, a here-string is stdin data
         // the script reads, not code - a signal word in it must not flag.
-        assert!(!is_interpreter_obfuscation(
-            "python3 app.py <<< 'note: see the b64decode helper'"
-        ));
+        for command in [
+            "python3 app.py <<< 'note: see the b64decode helper'",
+            "python3 <<< 'note: see the b64decode helper' -c \"print('safe')\"",
+        ] {
+            assert!(!is_interpreter_obfuscation(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn test_interpreter_option_values_do_not_hide_herestring_payloads() {
+        for command in [
+            "python3 -W ignore <<< \"import base64,os; \
+             os.system(base64.b64decode('eA==').decode())\"",
+            "env --split-string=\"bash -s\" <<< \
+             \"python3 -c \\\"import base64,os; os.system(base64.b64decode('eA==').decode())\\\"\"",
+        ] {
+            assert!(is_interpreter_obfuscation(command), "{command}");
+        }
     }
 
     #[test]
@@ -1734,6 +1920,12 @@ mod tests {
     fn test_env_split_string_shell_heredoc_scanned() {
         for command in [
             "env -S \"bash -s\" <<'SH'\n\
+             python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+             SH",
+            "env --split-string=\"bash -s\" <<'SH'\n\
+             python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+             SH",
+            "env --split-string=\"-u FOO bash -s\" <<'SH'\n\
              python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
              SH",
             "env -S \"-u FOO\" bash -s <<'SH'\n\
