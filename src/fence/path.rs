@@ -5,7 +5,7 @@ use crate::types::FenceConfig;
 /// Appended to out-of-allowlist fence prompts (never to hard denials): these
 /// are candidates for a policy allowlist entry, not safety blocks, so nudge
 /// toward requesting the modification instead of repeated one-off approvals.
-const ALLOWLIST_NUDGE: &str = " If this path is needed regularly, ask the human to allow it: add it to fence.allowed_paths in the project's .railguard.local.yaml (additive-only; denies always win) or in the global railguard.yaml. Details: `railguard guide`.";
+const ALLOWLIST_NUDGE: &str = " If this path is needed regularly, ask the human to allow it: explain why this directory needs to be added and request only the narrowest directory required (for example, /opt/lib/needed_dir rather than /opt). Add that directory to fence.allowed_paths in the project's .railguard.local.yaml (additive-only; denies always win) or in the global railguard.yaml. Details: `railguard guide`.";
 
 /// Result of a path fence check.
 #[derive(Debug, PartialEq)]
@@ -259,6 +259,25 @@ mod tests {
             check_path(&config, "/other/file.txt", "/project"),
             PathCheck::OutsideProject(_)
         ));
+    }
+
+    #[test]
+    fn test_outside_project_nudge_requests_reason_and_narrow_scope() {
+        let config = FenceConfig {
+            enabled: true,
+            allowed_paths: vec![],
+            denied_paths: vec![],
+            allow_local_overrides: false,
+        };
+        let PathCheck::OutsideProject(reason) =
+            check_path(&config, "/opt/lib/needed_dir/file.txt", "/project")
+        else {
+            panic!("outside path should require approval");
+        };
+
+        assert!(reason.contains("explain why"));
+        assert!(reason.contains("narrowest directory"));
+        assert!(reason.contains("/opt/lib/needed_dir rather than /opt"));
     }
 
     #[test]
