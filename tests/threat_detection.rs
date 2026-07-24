@@ -407,6 +407,42 @@ fn heredoc_python_obfuscated_asks() {
 }
 
 #[test]
+fn heredoc_data_for_python_script_allowed() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let cmd = "python3 helper.py <<'EOF'\n\
+               note: use the b64decode helper\n\
+               EOF";
+    let input = make_bash_input(&sid, cwd, cmd);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "heredoc data for a script file must be allowed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn env_split_string_shell_heredoc_obfuscation_asks() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let cmd = "env -S \"bash -s\" <<'SH'\n\
+               python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+               SH";
+    let input = make_bash_input(&sid, cwd, cmd);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "env -S shell wrapper must not hide an obfuscated heredoc: {}",
+        stdout
+    );
+}
+
+#[test]
 fn wrapper_option_values_do_not_hide_obfuscated_payloads() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();

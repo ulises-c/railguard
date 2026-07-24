@@ -448,7 +448,7 @@ fn collect_interpreter_payloads(
         collect_interpreter_payloads(sub, depth + 1, payloads);
     }
     for heredoc in &parsed.heredocs {
-        if is_shell_or_interpreter(&heredoc.consumer) {
+        if heredoc.body_is_code {
             payloads.push((PayloadKind::Script, heredoc.body.clone()));
         }
     }
@@ -612,7 +612,7 @@ fn collect_paths_from_text(text: &str, depth: usize, paths: &mut Vec<String>) {
         extract_paths_inner(sub, depth + 1, paths);
     }
     for heredoc in &parsed.heredocs {
-        if is_shell_or_interpreter(&heredoc.consumer) {
+        if heredoc.body_is_code {
             extract_paths_inner(&heredoc.body, depth + 1, paths);
         }
     }
@@ -687,12 +687,6 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
     }
 }
 
-/// Index of the real command in a segment, skipping leading env assignments,
-/// wrapper commands, and wrapper options with their arguments.
-fn effective_command_index(words: &[&str]) -> usize {
-    resolve_effective_command(words).0
-}
-
 fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
     let mut idx = 0;
     let mut wrapper = None;
@@ -723,6 +717,75 @@ fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
         }
     }
     (idx.min(words.len().saturating_sub(1)), split_commands)
+}
+
+fn heredoc_body_is_code(words: &[&str]) -> bool {
+    let (eff_idx, split_commands) = resolve_effective_command(words);
+    let split_command_reads_stdin = split_commands
+        .iter()
+        .any(|command| command_reads_stdin_as_code(command));
+    if split_command_reads_stdin {
+        return true;
+    }
+    if words
+        .get(eff_idx)
+        .is_some_and(|word| split_commands.contains(word))
+    {
+        return false;
+    }
+
+    let eff = words
+        .get(eff_idx)
+        .map(|word| command_basename(word))
+        .unwrap_or("");
+    if !is_shell_or_interpreter(eff) || eff == "eval" {
+        return false;
+    }
+    if eff == "busybox" {
+        return words
+            .iter()
+            .skip(eff_idx + 1)
+            .position(|word| !word.starts_with('-'))
+            .is_some_and(|offset| heredoc_body_is_code(&words[eff_idx + 1 + offset..]));
+    }
+
+    let mut pending_inline_code = false;
+    for word in words.iter().skip(eff_idx + 1) {
+        if pending_inline_code {
+            return false;
+        }
+        if is_inline_code_flag(eff, word) {
+            pending_inline_code = true;
+        } else if *word == "-"
+            || (is_shell(eff)
+                && word.starts_with('-')
+                && !word.starts_with("--")
+                && word[1..].contains('s'))
+        {
+            return true;
+        } else if !word.starts_with('-') {
+            return false;
+        }
+    }
+    !pending_inline_code
+}
+
+fn command_reads_stdin_as_code(command: &str) -> bool {
+    let parsed = tokenize_shell(command);
+    let mut reads_stdin_as_code = false;
+    for_each_segment(&parsed.tokens, |segment| {
+        let words: Vec<&str> = segment
+            .iter()
+            .filter_map(|token| match token {
+                ShellToken::Word(word) => Some(word.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !words.is_empty() && heredoc_body_is_code(&words) {
+            reads_stdin_as_code = true;
+        }
+    });
+    reads_stdin_as_code
 }
 
 const WRAPPER_VALUE_OPTIONS: &[(&str, &[&str])] = &[
@@ -1022,8 +1085,7 @@ enum ShellToken {
 }
 
 struct Heredoc {
-    /// First word of the segment the heredoc feeds (its consuming command).
-    consumer: String,
+    body_is_code: bool,
     body: String,
 }
 
@@ -1042,13 +1104,11 @@ struct LexState {
     substitutions: Vec<String>,
     word: String,
     has_word: bool,
-    /// Words of the current segment so far — used to resolve the effective
-    /// command that consumes a heredoc (past any wrapper/env prefix).
     segment_words: Vec<String>,
     /// Some(strip_tabs) right after a <</<<- operator: the next word is a heredoc delimiter.
     expecting_delim: Option<bool>,
-    /// Heredocs opened on the current line: (delimiter, strip_tabs, consumer).
-    pending: Vec<(String, bool, String)>,
+    /// Heredocs opened on the current line: (delimiter, strip_tabs, body_is_code).
+    pending: Vec<(String, bool, bool)>,
 }
 
 impl LexState {
@@ -1064,20 +1124,17 @@ impl LexState {
         let w = std::mem::take(&mut self.word);
         self.has_word = false;
         if let Some(strip_tabs) = self.expecting_delim.take() {
-            let consumer = self.effective_consumer();
-            self.pending.push((w, strip_tabs, consumer));
+            let body_is_code = self.current_heredoc_body_is_code();
+            self.pending.push((w, strip_tabs, body_is_code));
         } else {
             self.segment_words.push(w.clone());
             self.tokens.push(ShellToken::Word(w));
         }
     }
 
-    fn effective_consumer(&self) -> String {
+    fn current_heredoc_body_is_code(&self) -> bool {
         let refs: Vec<&str> = self.segment_words.iter().map(String::as_str).collect();
-        let idx = effective_command_index(&refs);
-        refs.get(idx)
-            .map(|w| command_basename(w).to_string())
-            .unwrap_or_default()
+        heredoc_body_is_code(&refs)
     }
 
     fn push_op(&mut self, op: &'static str, resets_segment: bool) {
@@ -1091,7 +1148,7 @@ impl LexState {
     /// Heredoc bodies start after the line that opened them. Returns the index
     /// past the consumed bodies.
     fn consume_heredoc_bodies(&mut self, chars: &[char], mut i: usize) -> usize {
-        while let Some((delim, strip_tabs, consumer)) = self.pending.first().cloned() {
+        while let Some((delim, strip_tabs, body_is_code)) = self.pending.first().cloned() {
             let mut body = String::new();
             let mut found = false;
             while i < chars.len() {
@@ -1115,7 +1172,7 @@ impl LexState {
                 body.push_str(&line);
                 body.push('\n');
             }
-            self.heredocs.push(Heredoc { consumer, body });
+            self.heredocs.push(Heredoc { body_is_code, body });
             self.pending.remove(0);
             if !found {
                 break;
@@ -1653,10 +1710,46 @@ mod tests {
     #[test]
     fn test_herestring_data_to_script_file_not_flagged() {
         // When the interpreter runs a script FILE, a here-string is stdin data
-        // the script reads, not code — a signal word in it must not flag.
+        // the script reads, not code - a signal word in it must not flag.
         assert!(!is_interpreter_obfuscation(
             "python3 app.py <<< 'note: see the b64decode helper'"
         ));
+    }
+
+    #[test]
+    fn test_heredoc_data_to_script_file_not_flagged() {
+        for command in [
+            "python3 app.py <<'EOF'\n\
+             note: see the b64decode helper\n\
+             EOF",
+            "env -S \"python3 app.py\" <<'EOF'\n\
+             note: see the b64decode helper\n\
+             EOF",
+        ] {
+            assert!(!is_interpreter_obfuscation(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn test_env_split_string_shell_heredoc_scanned() {
+        for command in [
+            "env -S \"bash -s\" <<'SH'\n\
+             python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+             SH",
+            "env -S \"-u FOO\" bash -s <<'SH'\n\
+             python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+             SH",
+        ] {
+            assert!(is_interpreter_obfuscation(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn test_env_split_string_node_heredoc_scanned() {
+        let command = "env -S \"node --input-type=commonjs\" <<'JS'\n\
+             eval(atob('Y29uc29sZS5sb2coMSk='))\n\
+             JS";
+        assert!(is_interpreter_obfuscation(command));
     }
 
     #[test]
@@ -1787,6 +1880,13 @@ mod tests {
     #[test]
     fn test_data_heredoc_not_scanned() {
         let cmd = "cat <<EOF\nSee /verify and ~/.claude/docs for details\nEOF";
+        let paths = extract_paths_from_command(cmd);
+        assert!(paths.is_empty(), "{:?}", paths);
+    }
+
+    #[test]
+    fn test_script_file_heredoc_data_not_scanned() {
+        let cmd = "python3 app.py <<EOF\nRead /etc/passwd as an example\nEOF";
         let paths = extract_paths_from_command(cmd);
         assert!(paths.is_empty(), "{:?}", paths);
     }
