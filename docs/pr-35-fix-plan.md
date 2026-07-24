@@ -1,5 +1,8 @@
 # PR #35 Fix Plan
 
+**Status: all four findings fixed** in `2bf7b5c`, `f129584`, `af97821`,
+`1b97471`. See [Outcome](#outcome) for the post-fix differential replay.
+
 Companion to [`pr-35-code-review.md`](pr-35-code-review.md). All four findings
 were reproduced end-to-end through the `PreToolUse` hook on
 `fix/18-detector-false-positives` (`284f763`) and cross-checked against
@@ -181,6 +184,46 @@ Must allow (false-positive guards, these are the point of the PR):
    `origin/main` worktree build. Every P1 row must read `ask` on both, and both
    `xargs` rows must read `allow` on both. This differential replay is what
    caught the regressions; it is the check that proves them closed.
+
+## Outcome
+
+Landed in the planned order, one commit per fix:
+
+| Commit | Fix |
+| --- | --- |
+| `2bf7b5c` | `xargs` stdin is argument data (P2, plus the here-string variant) |
+| `f129584` | quote- and escape-aware `read_substitution` (P1c) |
+| `af97821` | heredoc script bodies re-parsed as commands (P1b) |
+| `1b97471` | interpreters resolved past unrecognized runners (P1a) |
+
+One deviation from the plan: for path extraction, fix 1 recurses only the nested
+interpreter's `-c` payload rather than re-running the whole operand walk from
+the nested index. Re-running it would have re-read the runner's own operands as
+path candidates, which can invent a fence violation out of a `git -m` value.
+The narrower loop closes the same gap
+(`strace python3 -c "open('/etc/shadow')"` now reaches the fence) without that
+side effect.
+
+Post-fix differential replay, every case decided by both the `origin/main`
+binary and the fixed branch:
+
+- All eleven must-ask rows ask on both, including the five runner shapes
+  (`strace`, `taskset`, `watch`, `systemd-run`, `flock`), `bash`/`sh` heredocs
+  nesting a one-liner, `strace bash <<'SH'`, and the quoted-paren substitution.
+- All twenty must-allow rows allow on the fixed branch: both `xargs` data
+  shapes, clean `python3`/`bash` heredocs, and a corpus of everyday commands
+  (`cargo test`, `strace ./target/debug/railguard status`,
+  `watch -n 5 git status`, `find … | xargs rm -f`, `git ls-files | xargs grep -l
+  python3`, `sed 's/foo(1)/bar(2)/g'`, `env`/`nice`/`timeout` wrappers).
+- The only everyday row whose decision changed is
+  `git commit -m "document python3 -c chr() usage and the b64decode helper"`:
+  `main` asks, the branch allows. That is the false positive issue #18 exists to
+  remove, not a regression.
+
+Checks on the fixed branch: `cargo test --locked --all-targets` (343 passing,
+19 new), `cargo clippy --locked --all-targets --all-features -- -D warnings`
+clean, `cargo fmt --all --check` clean, `git diff --check origin/main...HEAD`
+clean.
 
 ## Suggested commit order
 
