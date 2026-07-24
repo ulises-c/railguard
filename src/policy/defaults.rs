@@ -284,17 +284,11 @@ pub fn default_blocklist() -> Vec<Rule> {
             action: "block".to_string(),
             message: Some("Blocked: text transform piped to shell can construct any command".to_string()),
         },
-        // Backstop for the inline `-c`/`-e` case; the authoritative detector is
-        // evasion::is_interpreter_obfuscation (runs first, payload-scoped, also
-        // covers heredocs). Keep this alternation in sync with that signal list
-        // until #27 consolidates the duplicated interpreter detection.
-        Rule {
-            name: "interpreter-obfuscation".to_string(),
-            tool: "Bash".to_string(),
-            pattern: r#"(?:python3?|ruby|perl|node)\s+-[ec]\s+.*(?:b64decode|b64encode|base64\..*decode|codecs\.decode|fromhex|unhexlify|atob\s*\(|chr\s*\(|\\x[0-9a-fA-F]{2}|eval\s*\(|exec\s*\(|compile\s*\(|system\s*\(|os\.system|os\.popen|subprocess|child_process|Popen\s*\(|fromCharCode|['"]/'*\s*\.\s*join\s*\()"#.to_string(),
-            action: "block".to_string(),
-            message: Some("Blocked: interpreter with string obfuscation can bypass command detection".to_string()),
-        },
+        // No interpreter-obfuscation rule here: evasion::is_interpreter_obfuscation
+        // (Tier 1, runs before policy evaluation) is the authoritative detector —
+        // payload-scoped, covers heredocs, and its ask can be session-approved.
+        // A whole-text regex backstop only ever fired on commands the classifier
+        // had already cleared, i.e. false positives on message text (issue #18).
         // ── Self-protection — always block (agent can't disable guardrails) ──
         Rule {
             name: "railguard-uninstall".to_string(),
@@ -408,7 +402,6 @@ mod tests {
         let block_rules = [
             "base64-to-shell",
             "transform-pipe-to-shell",
-            "interpreter-obfuscation",
             "printf-hex-exec",
         ];
         for name in &block_rules {

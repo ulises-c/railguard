@@ -316,6 +316,29 @@ fn benign_git_sequence_never_flagged() {
 }
 
 #[test]
+fn signal_words_in_commit_message_allowed() {
+    // Signal words inside message text ("python3 -e ... b64decode") are data,
+    // not an interpreter payload. Must pass the classifier AND the policy
+    // blocklist — the old whole-text interpreter-obfuscation rule hard-blocked
+    // this with no approval path.
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let input = make_bash_input(
+        &sid,
+        cwd,
+        r#"git commit -m "document python3 -e usage and b64decode helper""#,
+    );
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "signal words in a commit message must be allowed: {}",
+        stdout
+    );
+}
+
+#[test]
 fn tier1_ask_does_not_cascade_into_tier3() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();
