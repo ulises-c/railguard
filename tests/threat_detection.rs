@@ -476,6 +476,28 @@ fn heredoc_before_program_definition_is_data() {
 }
 
 #[test]
+fn shell_heredoc_nesting_an_inline_payload_asks() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "bash <<'SH'\n\
+         python3 -c \"import os; os.system(chr(108)+chr(115))\"\n\
+         SH",
+        "sh <<'SH'\n\
+         python3 -c \"import os; os.system(chr(108)+chr(115))\"\n\
+         SH",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "heredoc script hid a nested inline payload: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn xargs_stdin_is_argument_data_not_code() {
     let dir = create_test_dir();
     let cwd = dir.path().to_str().unwrap();

@@ -450,6 +450,10 @@ fn collect_interpreter_payloads(
     for heredoc in &parsed.heredocs {
         if heredoc.body_is_code {
             payloads.push((PayloadKind::Script, heredoc.body.clone()));
+            // A script body is also a command line: an inline one-liner nested
+            // inside it keeps the inline shape, and the script-level leniency
+            // for weak signals must not launder it (issue #18).
+            collect_interpreter_payloads(&heredoc.body, depth + 1, payloads);
         }
     }
 }
@@ -1838,6 +1842,28 @@ mod tests {
         assert!(is_interpreter_obfuscation(
             r#"echo "$(python3 -c 'import base64,os; os.system(base64.b64decode("eA==").decode())')""#
         ));
+    }
+
+    #[test]
+    fn test_shell_heredoc_nested_inline_payload_flagged() {
+        // The script-level leniency for weak signals applies to the script's own
+        // body, not to a one-liner nested inside it.
+        for cmd in [
+            "bash <<'SH'\npython3 -c \"import os; os.system(chr(108)+chr(115))\"\nSH",
+            "sh <<'SH'\nperl -e 'system(chr(108))'\nSH",
+        ] {
+            assert!(is_interpreter_obfuscation(cmd), "not flagged: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_shell_heredoc_clean_script_not_flagged() {
+        let cmd = "bash <<'SH'\n\
+                   set -euo pipefail\n\
+                   python3 helper.py --verbose\n\
+                   printf 'done\\n'\n\
+                   SH";
+        assert!(!is_interpreter_obfuscation(cmd));
     }
 
     #[test]
