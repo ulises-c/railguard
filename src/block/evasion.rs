@@ -340,9 +340,13 @@ static STRONG_OBFUSCATION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|
         r"fromhex",
         r"unhexlify",
         r"atob\s*\(",
-        r"eval\s*\(",
-        r"exec\s*\(",
-        r"compile\s*\(",
+        // Bare calls only: attribute calls (re.compile, model.eval,
+        // ast.literal_eval, child_process.exec) are everyday code, so require a
+        // non-word, non-dot char (or start) before the name. The regex crate
+        // has no lookbehind; the alternation group stands in for one.
+        r"(?:^|[^\w.])eval\s*\(",
+        r"(?:^|[^\w.])exec\s*\(",
+        r"(?:^|[^\w.])compile\s*\(",
     ])
 });
 
@@ -748,10 +752,11 @@ fn is_code_flag(w: &str) -> bool {
 /// Whether `w` is a flag that introduces an *inline code argument* for the
 /// interpreter `eff`. Unlike `is_code_flag` (used by path extraction, where
 /// over-recursion is harmless), this must be precise: a flag that takes no code
-/// (`-n`/`-p` autoloop, python's `-E` ignore-env) would otherwise swallow the
-/// following script filename as a bogus payload (issue #18). In a getopt short
-/// cluster the last letter is the one that consumes the next word, and only
-/// `-c`/`-e`/`-E` introduce code — and `-e`/`-E` never do so for python.
+/// (`-n`/`-p` autoloop, `sh -e` errexit, python's `-E` ignore-env) would
+/// otherwise swallow the following script filename as a bogus payload
+/// (issue #18). In a getopt short cluster the last letter is the one that
+/// consumes the next word. `-c` is code for every interpreter here; `-e` only
+/// for perl/ruby/node; `-E` only for perl.
 fn is_inline_code_flag(eff: &str, w: &str) -> bool {
     if w == "--eval" {
         return true;
@@ -761,7 +766,10 @@ fn is_inline_code_flag(eff: &str, w: &str) -> bool {
     }
     match w.chars().last() {
         Some('c') => true,
-        Some('e') | Some('E') => !eff.starts_with("python"),
+        Some('e') => {
+            eff.starts_with("perl") || eff.starts_with("ruby") || matches!(eff, "node" | "nodejs")
+        }
+        Some('E') => eff.starts_with("perl"),
         _ => false,
     }
 }
@@ -1441,6 +1449,43 @@ mod tests {
         assert!(is_interpreter_obfuscation(
             r#"echo "$(python3 -c 'import base64,os; os.system(base64.b64decode("eA==").decode())')""#
         ));
+    }
+
+    #[test]
+    fn test_heredoc_attribute_calls_not_flagged() {
+        // re.compile( / model.eval( / ast.literal_eval( are everyday Python;
+        // only BARE eval(/exec(/compile( are dynamic-code-execution signals.
+        let cmd = "python3 - <<'PY'\n\
+                   import re, ast\n\
+                   pat = re.compile(r'^foo')\n\
+                   cfg = ast.literal_eval(open('cfg.txt').read())\n\
+                   model.eval()\n\
+                   PY";
+        assert!(!is_interpreter_obfuscation(cmd));
+    }
+
+    #[test]
+    fn test_heredoc_bare_dynamic_exec_flagged() {
+        let cmd = "python3 - <<'PY'\n\
+                   code = open('payload.txt').read()\n\
+                   exec(compile(code, '<x>', 'exec'))\n\
+                   PY";
+        assert!(is_interpreter_obfuscation(cmd));
+    }
+
+    #[test]
+    fn test_inline_re_compile_not_flagged() {
+        assert!(!is_interpreter_obfuscation(
+            r#"python3 -c "import re; print(re.compile('^a').match('a') is not None)""#
+        ));
+    }
+
+    #[test]
+    fn test_shell_errexit_flag_does_not_capture_filename() {
+        // `sh -e` is errexit and `bash -E` is trap-inherit — neither takes
+        // inline code, so the script filename must not be scanned as a payload.
+        assert!(!is_interpreter_obfuscation("sh -e run_subprocess.sh"));
+        assert!(!is_interpreter_obfuscation("bash -E trap_subprocess.sh"));
     }
 
     #[test]
