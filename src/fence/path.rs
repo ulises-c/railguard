@@ -2,6 +2,11 @@ use std::path::Path;
 
 use crate::types::FenceConfig;
 
+/// Appended to out-of-allowlist fence prompts (never to hard denials): these
+/// are candidates for a policy allowlist entry, not safety blocks, so nudge
+/// toward requesting the modification instead of repeated one-off approvals.
+const ALLOWLIST_NUDGE: &str = " If this path is needed regularly, ask the human to allow it: add it to fence.allowed_paths in the project's .railguard.local.yaml (additive-only; denies always win) or in the global railguard.yaml. Details: `railguard guide`.";
+
 /// Result of a path fence check.
 #[derive(Debug, PartialEq)]
 pub enum PathCheck {
@@ -57,16 +62,16 @@ pub fn check_path(config: &FenceConfig, file_path: &str, cwd: &str) -> PathCheck
             }
         }
         return PathCheck::OutsideProject(format!(
-            "Path Fence: '{}' is not in any allowed path",
-            file_path
+            "Path Fence: '{}' is not in any allowed path.{}",
+            file_path, ALLOWLIST_NUDGE
         ));
     }
 
     // Default behavior: path outside the project directory needs approval
     if !path_starts_with(&canonical, &cwd_canonical) {
         return PathCheck::OutsideProject(format!(
-            "Path Fence: '{}' is outside project directory '{}'",
-            file_path, cwd
+            "Path Fence: '{}' is outside project directory '{}'.{}",
+            file_path, cwd, ALLOWLIST_NUDGE
         ));
     }
 

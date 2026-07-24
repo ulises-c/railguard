@@ -82,6 +82,26 @@ pub fn disable_bypass_permissions() -> Result<String, String> {
     Ok("Disabled bypass permissions mode".to_string())
 }
 
+/// True if a hooks-array entry invokes railguard.
+fn is_railguard_entry(entry: &Value) -> bool {
+    entry
+        .pointer("/hooks/0/command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c.contains("railguard"))
+}
+
+/// Add a railguard entry to an event's hook array, replacing any stale
+/// railguard entry but preserving user-added hooks.
+fn upsert_hook_entry(hooks_obj: &mut serde_json::Map<String, Value>, event: &str, entry: Value) {
+    let event_hooks = hooks_obj.entry(event).or_insert_with(|| json!([]));
+    if !event_hooks.is_array() {
+        *event_hooks = json!([]);
+    }
+    let arr = event_hooks.as_array_mut().unwrap();
+    arr.retain(|e| !is_railguard_entry(e));
+    arr.push(entry);
+}
+
 /// Install railguard hooks into Claude Code settings.
 pub fn install_hooks() -> Result<String, String> {
     let settings_path = claude_settings_path();
@@ -96,39 +116,17 @@ pub fn install_hooks() -> Result<String, String> {
 
     let hooks_obj = hooks.as_object_mut().ok_or("hooks is not a JSON object")?;
 
-    // PreToolUse hook — blocks/approves/traces before execution
-    let pre_hook = json!([{
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} hook --event PreToolUse", binary),
-            "timeout": 5
-        }]
-    }]);
-
-    // PostToolUse hook — traces results, captures snapshots
-    let post_hook = json!([{
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} hook --event PostToolUse", binary),
-            "timeout": 5
-        }]
-    }]);
-
-    // SessionStart hook — initializes session logging
-    let session_hook = json!([{
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} hook --event SessionStart", binary),
-            "timeout": 5
-        }]
-    }]);
-
-    hooks_obj.insert("PreToolUse".to_string(), pre_hook);
-    hooks_obj.insert("PostToolUse".to_string(), post_hook);
-    hooks_obj.insert("SessionStart".to_string(), session_hook);
+    for event in ["PreToolUse", "PostToolUse", "SessionStart"] {
+        let entry = json!({
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": format!("{} hook --event {}", binary, event),
+                "timeout": 5
+            }]
+        });
+        upsert_hook_entry(hooks_obj, event, entry);
+    }
 
     // Set CLAUDE_CODE_SHELL to railguard-shell for OS-level sandboxing.
     // This makes every Bash tool call run through our sandboxed shell.
@@ -281,13 +279,7 @@ pub fn uninstall_hooks() -> Result<String, String> {
         for event in &["PreToolUse", "PostToolUse", "SessionStart"] {
             if let Some(event_hooks) = hooks.get_mut(*event) {
                 if let Some(arr) = event_hooks.as_array_mut() {
-                    arr.retain(|entry| {
-                        let is_railguard = entry
-                            .pointer("/hooks/0/command")
-                            .and_then(|c| c.as_str())
-                            .is_some_and(|c| c.contains("railguard"));
-                        !is_railguard
-                    });
+                    arr.retain(|entry| !is_railguard_entry(entry));
                     if arr.is_empty() {
                         hooks.remove(*event);
                     }
@@ -581,5 +573,45 @@ mod tests {
     #[test]
     fn strip_returns_none_without_marker() {
         assert!(strip_railguard_section("# Just user notes\n").is_none());
+    }
+
+    #[test]
+    fn upsert_hook_preserves_user_hooks_and_replaces_stale_railguard() {
+        let mut hooks = json!({
+            "PreToolUse": [
+                {"matcher": "", "hooks": [{"type": "command", "command": "my-custom-linter"}]},
+                {"matcher": "", "hooks": [{"type": "command", "command": "/old/path/railguard hook --event PreToolUse"}]}
+            ]
+        });
+        let hooks_obj = hooks.as_object_mut().unwrap();
+        let entry = json!({"matcher": "", "hooks": [{"type": "command", "command": "/new/railguard hook --event PreToolUse"}]});
+        upsert_hook_entry(hooks_obj, "PreToolUse", entry);
+
+        let arr = hooks_obj["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "got: {arr:?}");
+        assert!(arr
+            .iter()
+            .any(|e| e.pointer("/hooks/0/command").unwrap() == "my-custom-linter"));
+        assert!(arr
+            .iter()
+            .any(|e| e.pointer("/hooks/0/command").unwrap()
+                == "/new/railguard hook --event PreToolUse"));
+        assert!(!arr.iter().any(|e| {
+            e.pointer("/hooks/0/command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| c.starts_with("/old/"))
+        }));
+    }
+
+    #[test]
+    fn upsert_hook_creates_event_when_missing() {
+        let mut hooks = json!({});
+        let hooks_obj = hooks.as_object_mut().unwrap();
+        upsert_hook_entry(
+            hooks_obj,
+            "SessionStart",
+            json!({"matcher": "", "hooks": [{"type": "command", "command": "railguard hook --event SessionStart"}]}),
+        );
+        assert_eq!(hooks_obj["SessionStart"].as_array().unwrap().len(), 1);
     }
 }
