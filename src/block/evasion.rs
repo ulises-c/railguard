@@ -477,15 +477,25 @@ fn collect_payloads_from_segment(
     for command in split_commands {
         collect_interpreter_payloads(&format!("env {command}"), depth + 1, payloads);
     }
-    let eff = words
-        .get(eff_idx)
-        .map(|w| command_basename(w))
-        .unwrap_or("");
     let stdin_is_code = heredoc_body_is_code(&words);
-    if !is_shell_or_interpreter(eff) && !stdin_is_code {
-        return;
+    for idx in command_start_indices(&words, eff_idx) {
+        let eff = words.get(idx).map(|w| command_basename(w)).unwrap_or("");
+        if !is_shell_or_interpreter(eff) && !stdin_is_code {
+            continue;
+        }
+        collect_inline_payloads(tokens, eff, idx, stdin_is_code, payloads);
     }
+}
 
+/// Collect the inline code payloads a single command start hands its interpreter:
+/// `-c`/`-e` values, `eval` arguments, and a here-string body.
+fn collect_inline_payloads(
+    tokens: &[&ShellToken],
+    eff: &str,
+    eff_idx: usize,
+    stdin_is_code: bool,
+    payloads: &mut Vec<(PayloadKind, String)>,
+) {
     let mut pending_inline_code = false;
     let mut pending_option_value = false;
     let mut here_string = false;
@@ -700,6 +710,21 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
             }
         }
     }
+
+    // An unrecognized runner (`strace python3 -c "open('~/.ssh/id_ed25519')"`)
+    // leaves the nested interpreter's code unscanned above. Recurse just that
+    // code, not the runner's own operands, so paths inside it still reach the
+    // fence (issue #27).
+    for idx in command_start_indices(&words, eff_idx).into_iter().skip(1) {
+        let mut recurse_next = false;
+        for word in words.iter().skip(idx + 1) {
+            if std::mem::take(&mut recurse_next) {
+                extract_paths_inner(word, depth + 1, paths);
+            } else if is_code_flag(word) {
+                recurse_next = true;
+            }
+        }
+    }
 }
 
 fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
@@ -739,6 +764,27 @@ fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
     (idx.min(words.len().saturating_sub(1)), split_commands)
 }
 
+/// Word indices to scan as command starts: the resolved effective command, plus
+/// any later bare interpreter word when the effective command is not itself an
+/// interpreter. `is_wrapper` is a finite list, so an unrecognized runner
+/// (`strace`, `taskset`, `watch`, `systemd-run`, `flock`, …) would otherwise
+/// hide the interpreter it execs and fail open. Matching is on whole shell words
+/// after quote removal, so an interpreter named inside quoted data
+/// (`git commit -m "python3 -c ..."`) is one word and never a command start.
+fn command_start_indices(words: &[&str], eff_idx: usize) -> Vec<usize> {
+    let mut indices = vec![eff_idx];
+    let eff_is_interpreter = words
+        .get(eff_idx)
+        .is_some_and(|word| is_shell_or_interpreter(command_basename(word)));
+    if !eff_is_interpreter {
+        indices.extend(
+            (eff_idx + 1..words.len())
+                .filter(|&idx| is_shell_or_interpreter(command_basename(words[idx]))),
+        );
+    }
+    indices
+}
+
 fn heredoc_body_is_code(words: &[&str]) -> bool {
     let (eff_idx, split_commands) = resolve_effective_command(words);
     // `xargs` reads stdin itself and hands the wrapped command *arguments*, so a
@@ -767,8 +813,14 @@ fn heredoc_body_is_code(words: &[&str]) -> bool {
         .get(eff_idx)
         .map(|word| command_basename(word))
         .unwrap_or("");
-    if !is_shell_or_interpreter(eff) || eff == "eval" {
+    if eff == "eval" {
         return false;
+    }
+    if !is_shell_or_interpreter(eff) {
+        return command_start_indices(words, eff_idx)
+            .into_iter()
+            .skip(1)
+            .any(|idx| heredoc_body_is_code(&words[idx..]));
     }
     if eff == "busybox" {
         return words
@@ -1842,6 +1894,46 @@ mod tests {
         assert!(is_interpreter_obfuscation(
             r#"echo "$(python3 -c 'import base64,os; os.system(base64.b64decode("eA==").decode())')""#
         ));
+    }
+
+    #[test]
+    fn test_unrecognized_runner_does_not_hide_interpreter() {
+        // is_wrapper is a finite list; a runner outside it must not fail open.
+        for cmd in [
+            "strace python3 -c \"import os; os.system(chr(108)+chr(115))\"",
+            "taskset -c 0 python3 -c \"import os; os.system(chr(108)+chr(115))\"",
+            "watch -n 1 python3 -c \"import os; os.system(chr(108)+chr(115))\"",
+            "systemd-run --user python3 -c \"import os; os.system(chr(108)+chr(115))\"",
+            "flock /tmp/l python3 -c \"import os; os.system(chr(108)+chr(115))\"",
+        ] {
+            assert!(is_interpreter_obfuscation(cmd), "not flagged: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_unrecognized_runner_heredoc_still_classified_as_code() {
+        let cmd = "strace bash <<'SH'\n\
+                   eval(base64_decode('ZWNobyAxOw=='));\n\
+                   SH";
+        assert!(is_interpreter_obfuscation(cmd));
+    }
+
+    #[test]
+    fn test_unrecognized_runner_path_payload_extracted() {
+        let paths = extract_paths_from_command("strace python3 -c \"open('/etc/shadow').read()\"");
+        assert!(paths.contains(&"/etc/shadow".to_string()), "{:?}", paths);
+    }
+
+    #[test]
+    fn test_interpreter_named_in_data_is_not_a_command_start() {
+        // Quoted data collapses to one word, so it can never be a command start.
+        for cmd in [
+            r#"git commit -m "document python3 -c chr() usage and b64decode helper""#,
+            r#"grep -rn "python3 -c" ."#,
+            r#"echo "python3 -c 'import os; os.system(chr(108))'" > notes.txt"#,
+        ] {
+            assert!(!is_interpreter_obfuscation(cmd), "false positive: {cmd}");
+        }
     }
 
     #[test]
