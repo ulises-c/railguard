@@ -279,11 +279,29 @@ blocklist:
     }
 
     #[test]
-    fn test_local_override_ignored_without_opt_in() {
+    fn test_local_override_honored_by_default() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("railguard.yaml"),
             "version: 1\nfence:\n  enabled: true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".railguard.local.yaml"),
+            "fence:\n  allowed_paths:\n    - \"~/notes\"\n",
+        )
+        .unwrap();
+
+        let policy = load_policy_or_defaults(dir.path());
+        assert!(policy.fence.allowed_paths.iter().any(|p| p == "~/notes"));
+    }
+
+    #[test]
+    fn test_local_override_ignored_when_opted_out() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("railguard.yaml"),
+            "version: 1\nfence:\n  enabled: true\n  allow_local_overrides: false\n",
         )
         .unwrap();
         std::fs::write(
