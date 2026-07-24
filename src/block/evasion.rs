@@ -1456,13 +1456,22 @@ fn tokenize_shell(text: &str) -> TokenizedCommand {
 
 /// Read a `$(...)` body starting just past the opening paren.
 /// Returns the body and the index past the closing paren.
+///
+/// Quote- and escape-aware: a parenthesis inside a quoted string is literal, so
+/// counting it would truncate the substitution and hide the code after it
+/// (`"$(printf ')'; python3 -c '...')"`).
 fn read_substitution(chars: &[char], start: usize) -> (String, usize) {
     let mut depth = 1usize;
+    let mut in_single = false;
+    let mut in_double = false;
     let mut j = start;
     while j < chars.len() {
         match chars[j] {
-            '(' => depth += 1,
-            ')' => {
+            '\\' if !in_single => j += 1,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
                 depth -= 1;
                 if depth == 0 {
                     break;
@@ -1829,6 +1838,34 @@ mod tests {
         assert!(is_interpreter_obfuscation(
             r#"echo "$(python3 -c 'import base64,os; os.system(base64.b64decode("eA==").decode())')""#
         ));
+    }
+
+    #[test]
+    fn test_quoted_paren_does_not_truncate_substitution() {
+        // A `)` inside a quoted string is literal: counting it as the closing
+        // paren would drop the interpreter call that follows.
+        for cmd in [
+            r#"echo "$(printf ')'; python3 -c 'import os; os.system(chr(108))')""#,
+            r#"echo "$(printf ")"; python3 -c 'import os; os.system(chr(108))')""#,
+            r#"echo "$(printf \); python3 -c 'import os; os.system(chr(108))')""#,
+            r#"echo "$(echo "$(date)"; python3 -c 'import os; os.system(chr(108))')""#,
+        ] {
+            assert!(is_interpreter_obfuscation(cmd), "not flagged: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_read_substitution_respects_quotes_and_nesting() {
+        let read = |text: &str| {
+            let chars: Vec<char> = text.chars().collect();
+            read_substitution(&chars, 0)
+        };
+        assert_eq!(read("printf ')' ; ls)").0, "printf ')' ; ls");
+        assert_eq!(read(r#"printf ")" ; ls)"#).0, r#"printf ")" ; ls"#);
+        assert_eq!(read(r"printf \) ; ls)").0, r"printf \) ; ls");
+        assert_eq!(read("echo $(date) ; ls)").0, "echo $(date) ; ls");
+        // Unbalanced input must terminate at end of text, not spin.
+        assert_eq!(read("echo '(").0, "echo '(");
     }
 
     #[test]
