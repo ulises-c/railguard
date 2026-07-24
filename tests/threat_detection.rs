@@ -406,6 +406,39 @@ fn heredoc_python_obfuscated_asks() {
     );
 }
 
+#[test]
+fn wrapper_option_values_do_not_hide_obfuscated_payloads() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        r#"sudo -u root python3 -c "import base64,os; os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())""#,
+        r#"env -u FOO python3 -c "import base64,os; os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())""#,
+        r#"env -S "python3 -c \"import base64,os; os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())\"""#,
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "wrapper hid obfuscated payload: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn combined_shell_flags_do_not_hide_obfuscated_payloads() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let command = r#"bash -cx "python3 -c \"import base64,os; os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())\"""#;
+    let input = make_bash_input(&unique_session_id(), cwd, command);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+
+    assert!(
+        output_is_not_allowed(&stdout),
+        "combined shell flags hid obfuscated payload: {stdout}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // SESSION STATE PERSISTENCE
 // ═══════════════════════════════════════════════════════════════════

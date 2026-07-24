@@ -439,7 +439,7 @@ fn collect_interpreter_payloads(
     let parsed = tokenize_shell(cmd);
 
     for_each_segment(&parsed.tokens, |segment| {
-        collect_payloads_from_segment(segment, payloads);
+        collect_payloads_from_segment(segment, depth, payloads);
     });
 
     // Obfuscation hidden in a command substitution feeding another command is
@@ -456,6 +456,7 @@ fn collect_interpreter_payloads(
 
 fn collect_payloads_from_segment(
     tokens: &[&ShellToken],
+    depth: usize,
     payloads: &mut Vec<(PayloadKind, String)>,
 ) {
     let words: Vec<&str> = tokens
@@ -468,7 +469,10 @@ fn collect_payloads_from_segment(
     if words.is_empty() {
         return;
     }
-    let eff_idx = effective_command_index(&words);
+    let (eff_idx, split_commands) = resolve_effective_command(&words);
+    for command in split_commands {
+        collect_interpreter_payloads(command, depth + 1, payloads);
+    }
     let eff = words
         .get(eff_idx)
         .map(|w| command_basename(w))
@@ -637,7 +641,10 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
     if words.is_empty() {
         return;
     }
-    let eff_idx = effective_command_index(&words);
+    let (eff_idx, split_commands) = resolve_effective_command(&words);
+    for command in split_commands {
+        extract_paths_inner(command, depth + 1, paths);
+    }
     let eff = words
         .get(eff_idx)
         .map(|w| command_basename(w))
@@ -680,18 +687,33 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
     }
 }
 
-/// Index of the real command in a segment, skipping a leading run of env
-/// assignments (`FOO=bar`), wrapper commands (`env`, `timeout`, `xargs`, ...),
-/// and — once a wrapper has been seen — that wrapper's flag/numeric arguments.
+/// Index of the real command in a segment, skipping leading env assignments,
+/// wrapper commands, and wrapper options with their arguments.
 fn effective_command_index(words: &[&str]) -> usize {
+    resolve_effective_command(words).0
+}
+
+fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
     let mut idx = 0;
-    let mut saw_prefix = false;
+    let mut wrapper = None;
+    let mut split_commands = Vec::new();
     while idx < words.len() {
         let w = words[idx];
-        if is_env_assignment(w) || is_wrapper(command_basename(w)) {
-            saw_prefix = true;
+        let command = command_basename(w);
+        if is_env_assignment(w) {
             idx += 1;
-        } else if saw_prefix
+        } else if is_wrapper(command) {
+            wrapper = Some(command);
+            idx += 1;
+        } else if wrapper.is_some_and(|wrapper| wrapper_option_takes_value(wrapper, w)) {
+            if wrapper == Some("env")
+                && matches!(w, "-S" | "--split-string")
+                && idx + 1 < words.len()
+            {
+                split_commands.push(words[idx + 1]);
+            }
+            idx += 2;
+        } else if wrapper.is_some()
             && !w.is_empty()
             && (w.starts_with('-') || w.chars().all(|c| c.is_ascii_digit()))
         {
@@ -700,7 +722,119 @@ fn effective_command_index(words: &[&str]) -> usize {
             break;
         }
     }
-    idx.min(words.len().saturating_sub(1))
+    (idx.min(words.len().saturating_sub(1)), split_commands)
+}
+
+const WRAPPER_VALUE_OPTIONS: &[(&str, &[&str])] = &[
+    (
+        "env",
+        &[
+            "-u",
+            "--unset",
+            "-C",
+            "--chdir",
+            "-S",
+            "--split-string",
+            "--argv0",
+        ],
+    ),
+    ("exec", &["-a"]),
+    ("nice", &["-n", "--adjustment"]),
+    (
+        "ionice",
+        &[
+            "-c",
+            "--class",
+            "-n",
+            "--classdata",
+            "-p",
+            "--pid",
+            "-P",
+            "--pgid",
+            "-u",
+            "--uid",
+        ],
+    ),
+    ("timeout", &["-k", "--kill-after", "-s", "--signal"]),
+    (
+        "stdbuf",
+        &["-i", "--input", "-o", "--output", "-e", "--error"],
+    ),
+    (
+        "xargs",
+        &[
+            "-a",
+            "--arg-file",
+            "-E",
+            "--eof",
+            "-I",
+            "--replace",
+            "-L",
+            "--max-lines",
+            "-n",
+            "--max-args",
+            "-P",
+            "--max-procs",
+            "-s",
+            "--max-chars",
+            "--process-slot-var",
+        ],
+    ),
+    (
+        "chrt",
+        &[
+            "-T",
+            "--sched-runtime",
+            "-P",
+            "--sched-period",
+            "-D",
+            "--sched-deadline",
+        ],
+    ),
+    ("time", &["-f", "--format", "-o", "--output"]),
+    ("proxychains", &["-f"]),
+    ("proxychains4", &["-f"]),
+    (
+        "sudo",
+        &[
+            "-a",
+            "--auth-type",
+            "-C",
+            "--close-from",
+            "-c",
+            "--login-class",
+            "-D",
+            "--chdir",
+            "-g",
+            "--group",
+            "-h",
+            "--host",
+            "-p",
+            "--prompt",
+            "-R",
+            "--chroot",
+            "-r",
+            "--role",
+            "-T",
+            "--command-timeout",
+            "-t",
+            "--type",
+            "-U",
+            "--other-user",
+            "-u",
+            "--user",
+        ],
+    ),
+    (
+        "doas",
+        &["-a", "--auth-style", "-C", "--config", "-u", "--user"],
+    ),
+];
+
+fn wrapper_option_takes_value(wrapper: &str, option: &str) -> bool {
+    WRAPPER_VALUE_OPTIONS
+        .iter()
+        .any(|(command, options)| *command == wrapper && options.contains(&option))
 }
 
 fn is_env_assignment(w: &str) -> bool {
@@ -736,8 +870,8 @@ fn is_wrapper(cmd: &str) -> bool {
 }
 
 /// A flag that introduces inline code for a shell/interpreter: `--eval`, or a
-/// single-dash cluster containing a code letter — `c` (sh/python), `e`/`E`
-/// (perl/ruby/node), `n`/`p` (perl/node autoloop) — so `-c`, `-E`, `-cx`, `-ne`
+/// single-dash cluster containing a code letter - `c` (sh/python), `e`/`E`
+/// (perl/ruby/node), `n`/`p` (perl/node autoloop) - so `-c`, `-E`, `-cx`, `-ne`
 /// all match. Only consulted when the effective command is an interpreter.
 fn is_code_flag(w: &str) -> bool {
     w == "--eval"
@@ -754,15 +888,17 @@ fn is_code_flag(w: &str) -> bool {
 /// over-recursion is harmless), this must be precise: a flag that takes no code
 /// (`-n`/`-p` autoloop, `sh -e` errexit, python's `-E` ignore-env) would
 /// otherwise swallow the following script filename as a bogus payload
-/// (issue #18). In a getopt short cluster the last letter is the one that
-/// consumes the next word. `-c` is code for every interpreter here; `-e` only
-/// for perl/ruby/node; `-E` only for perl.
+/// (issue #18). Shells accept `c` anywhere in a short option cluster. For other
+/// interpreters, the final letter determines whether the next word is code.
 fn is_inline_code_flag(eff: &str, w: &str) -> bool {
     if w == "--eval" {
         return true;
     }
     if w.len() < 2 || !w.starts_with('-') || w.starts_with("--") {
         return false;
+    }
+    if is_shell(eff) && w[1..].contains('c') {
+        return true;
     }
     match w.chars().last() {
         Some('c') => true,
@@ -772,6 +908,13 @@ fn is_inline_code_flag(eff: &str, w: &str) -> bool {
         Some('E') => eff.starts_with("perl"),
         _ => false,
     }
+}
+
+fn is_shell(command: &str) -> bool {
+    matches!(
+        command,
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash"
+    )
 }
 
 fn push_candidate(word: &str, paths: &mut Vec<String>) {
@@ -1489,6 +1632,25 @@ mod tests {
     }
 
     #[test]
+    fn test_wrapper_option_values_do_not_hide_interpreter() {
+        for command in [
+            r#"sudo -u root python3 -c "base64.b64decode('eA==')""#,
+            r#"env -u FOO python3 -c "base64.b64decode('eA==')""#,
+            r#"env -S "python3 -c \"base64.b64decode('eA==')\"""#,
+        ] {
+            assert!(is_interpreter_obfuscation(command), "{command}");
+        }
+        assert!(!is_interpreter_obfuscation(r#"env -S "python3 script.py""#));
+    }
+
+    #[test]
+    fn test_shell_code_flag_can_precede_other_flags() {
+        assert!(is_interpreter_obfuscation(
+            r#"bash -cx "python3 -c \"base64.b64decode('eA==')\"""#
+        ));
+    }
+
+    #[test]
     fn test_herestring_data_to_script_file_not_flagged() {
         // When the interpreter runs a script FILE, a here-string is stdin data
         // the script reads, not code — a signal word in it must not flag.
@@ -1737,6 +1899,8 @@ mod tests {
             r#"timeout 5 bash -c "cat ~/.ssh/id_rsa""#,
             r#"nice -n 10 bash -c "cat ~/.ssh/id_rsa""#,
             r#"env FOO=bar bash -c "cat ~/.ssh/id_rsa""#,
+            r#"sudo -u root bash -c "cat ~/.ssh/id_rsa""#,
+            r#"env -S "bash -c \"cat ~/.ssh/id_rsa\"""#,
         ] {
             assert!(
                 extract_paths_from_command(cmd).contains(&"~/.ssh/id_rsa".to_string()),
