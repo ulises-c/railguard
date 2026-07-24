@@ -152,10 +152,12 @@ pub struct FenceConfig {
     #[serde(default)]
     pub denied_paths: Vec<String>,
     /// When true, a project-local `.railguard.local.yaml` may *add* to
-    /// `allowed_paths` (never remove denies). Off by default so a cloned or
-    /// hostile repo cannot self-grant filesystem access — only the human's
-    /// base policy can opt a machine in.
-    #[serde(default)]
+    /// `allowed_paths` (never remove denies). On by default: overrides are
+    /// additive-only and denied_paths always win, so a hostile repo can widen
+    /// reads/writes outside its own tree but never reach denied paths. Edits
+    /// to any railguard yaml are approval-gated. Set false to require the
+    /// human's base policy to opt each machine in.
+    #[serde(default = "default_true")]
     pub allow_local_overrides: bool,
 }
 
@@ -172,7 +174,7 @@ impl Default for FenceConfig {
                 "~/.claude".to_string(),
                 "/etc".to_string(),
             ],
-            allow_local_overrides: false,
+            allow_local_overrides: true,
         }
     }
 }

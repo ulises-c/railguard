@@ -307,14 +307,14 @@ pub fn default_blocklist() -> Vec<Rule> {
         Rule {
             name: "railguard-config-edit".to_string(),
             tool: "Write".to_string(),
-            pattern: r"railguard\.yaml".to_string(),
+            pattern: r"railguard(\.local)?\.yaml".to_string(),
             action: "approve".to_string(),
             message: Some("Writing Railguard policy requires human approval".to_string()),
         },
         Rule {
             name: "railguard-config-edit-2".to_string(),
             tool: "Edit".to_string(),
-            pattern: r"railguard\.yaml".to_string(),
+            pattern: r"railguard(\.local)?\.yaml".to_string(),
             action: "approve".to_string(),
             message: Some("Editing Railguard policy requires human approval".to_string()),
         },
