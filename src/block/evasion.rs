@@ -740,9 +740,21 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
 }
 
 fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
+    let (eff_idx, split_commands, _) = resolve_command_chain(words);
+    (eff_idx, split_commands)
+}
+
+/// Resolve a segment's effective command, also reporting the wrapper words that
+/// preceded it and where they sat. Only these positions and `eff_idx` are real
+/// command words: everything else in the chain is an env assignment, an option, or
+/// an option *value* (`env -u grep bash` unsets a variable named `grep`, it does
+/// not run `grep`), so a caller asking "does a command here do X" must not scan
+/// raw words.
+fn resolve_command_chain<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>, Vec<(usize, &'a str)>) {
     let mut idx = 0;
     let mut wrapper = None;
     let mut split_commands = Vec::new();
+    let mut wrappers = Vec::new();
     while idx < words.len() {
         let w = words[idx];
         let command = command_basename(w);
@@ -750,6 +762,7 @@ fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
             idx += 1;
         } else if is_wrapper(command) {
             wrapper = Some(command);
+            wrappers.push((idx, command));
             idx += 1;
         } else if let Some(split_command) =
             env_split_string_value(w).filter(|_| wrapper == Some("env"))
@@ -773,7 +786,11 @@ fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
             break;
         }
     }
-    (idx.min(words.len().saturating_sub(1)), split_commands)
+    (
+        idx.min(words.len().saturating_sub(1)),
+        split_commands,
+        wrappers,
+    )
 }
 
 /// Word indices to scan as command starts: the resolved effective command, plus
@@ -785,10 +802,11 @@ fn resolve_effective_command<'a>(words: &[&'a str]) -> (usize, Vec<&'a str>) {
 /// (`git commit -m "python3 -c ..."`) is one word and never a command start.
 fn command_start_indices(words: &[&str], eff_idx: usize) -> Vec<usize> {
     let mut indices = vec![eff_idx];
-    let eff_is_interpreter = words
+    let eff = words
         .get(eff_idx)
-        .is_some_and(|word| is_shell_or_interpreter(command_basename(word)));
-    if !eff_is_interpreter {
+        .map(|word| command_basename(word))
+        .unwrap_or("");
+    if !is_shell_or_interpreter(eff) && !treats_arguments_as_data(eff) {
         indices.extend(
             (eff_idx + 1..words.len())
                 .filter(|&idx| is_shell_or_interpreter(command_basename(words[idx]))),
@@ -838,30 +856,47 @@ fn consumes_stdin_as_data(command: &str) -> bool {
     )
 }
 
+/// Commands that treat their arguments as text rather than a command to run, so a
+/// later interpreter word is an operand and not a command start: `printf '%s\n'
+/// python3 -c …` prints those words, it does not run python. Same finite-list
+/// polarity as `consumes_stdin_as_data`.
+fn treats_arguments_as_data(command: &str) -> bool {
+    consumes_stdin_as_data(command) || matches!(command, "echo" | "printf" | "true" | "false" | ":")
+}
+
 /// Whether stdin reaches a data consumer rather than the effective command.
+/// Only the effective command and the wrapper chain count as commands, so an
+/// option value that happens to share a name (`env -u grep bash`) is not mistaken
+/// for one.
 ///
 /// `xargs -a file` is the exception: it takes its item list from the file and
 /// leaves the child's stdin attached, so a heredoc there really is the wrapped
-/// command's script.
-fn stdin_is_data_for(words: &[&str], eff_idx: usize) -> bool {
-    let leading = || words.iter().take(eff_idx + 1);
-    let mut consumers = leading().filter(|word| consumes_stdin_as_data(command_basename(word)));
-    let Some(consumer) = consumers.next() else {
-        return false;
-    };
-    if command_basename(consumer) != "xargs" {
+/// command's script. That option scan is bounded to `xargs`'s own words, since
+/// other wrappers spell unrelated options `-a` too (`sudo -a`, `exec -a`).
+fn stdin_is_data_for(words: &[&str], eff_idx: usize, wrappers: &[(usize, &str)]) -> bool {
+    let eff_consumes = words
+        .get(eff_idx)
+        .is_some_and(|word| consumes_stdin_as_data(command_basename(word)));
+    if eff_consumes {
         return true;
     }
-    !leading().any(|word| {
-        *word == "-a"
-            || word.starts_with("--arg-file")
-            || (word.starts_with("-a") && !word.starts_with("--"))
-    })
+    let Some(&(xargs_idx, _)) = wrappers
+        .iter()
+        .find(|(_, command)| consumes_stdin_as_data(command))
+    else {
+        return false;
+    };
+    let arg_file = words
+        .iter()
+        .take(eff_idx)
+        .skip(xargs_idx + 1)
+        .any(|word| word.starts_with("-a") || word.starts_with("--arg-file"));
+    !arg_file
 }
 
 fn heredoc_body_is_code(words: &[&str]) -> bool {
-    let (eff_idx, split_commands) = resolve_effective_command(words);
-    if stdin_is_data_for(words, eff_idx) {
+    let (eff_idx, split_commands, wrappers) = resolve_command_chain(words);
+    if stdin_is_data_for(words, eff_idx, &wrappers) {
         return false;
     }
     let split_command_reads_stdin = split_commands
@@ -1591,7 +1626,9 @@ fn read_substitution(chars: &[char], start: usize) -> (String, usize) {
     let mut j = start;
     while j < chars.len() {
         match chars[j] {
-            '\\' if !in_single => j += 1,
+            // A trailing backslash escapes nothing: skipping past it would run the
+            // index past the end and panic on the final slice.
+            '\\' if !in_single && j + 1 < chars.len() => j += 1,
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
             '(' if !in_single && !in_double => depth += 1,
@@ -2002,6 +2039,39 @@ mod tests {
         ] {
             assert!(!is_interpreter_obfuscation(cmd), "false positive: {cmd}");
         }
+    }
+
+    #[test]
+    fn test_option_value_is_not_a_stdin_consumer() {
+        // `env -u grep bash` unsets a variable named grep and runs bash on the
+        // heredoc; the option value must not be read as a data-consuming command.
+        for cmd in [
+            "env -u grep bash <<'EOF'\neval(base64_decode('ZWNobyAxOw=='));\nEOF",
+            "env -u xargs bash <<'EOF'\neval(base64_decode('ZWNobyAxOw=='));\nEOF",
+            "sudo -u cat bash <<'EOF'\neval(base64_decode('ZWNobyAxOw=='));\nEOF",
+        ] {
+            assert!(is_interpreter_obfuscation(cmd), "not flagged: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_argument_only_commands_do_not_promote_operands() {
+        // printf/echo print their arguments; an interpreter word there is text.
+        for cmd in [
+            "printf '%s\\n' python3 -c 'import os; os.system(chr(108))'",
+            "echo python3 -c 'import os; os.system(chr(108))'",
+        ] {
+            assert!(!is_interpreter_obfuscation(cmd), "false positive: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_unterminated_substitution_with_trailing_escape() {
+        // Malformed command text must not panic: the hook has to return a decision.
+        assert!(!is_interpreter_obfuscation("echo \"$(foo\\"));
+        assert!(extract_paths_from_command("echo \"$(foo\\").is_empty());
+        let chars: Vec<char> = "foo\\".chars().collect();
+        assert_eq!(read_substitution(&chars, 0).0, "foo\\");
     }
 
     #[test]
