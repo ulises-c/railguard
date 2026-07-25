@@ -478,21 +478,28 @@ fn collect_payloads_from_segment(
         collect_interpreter_payloads(&format!("env {command}"), depth + 1, payloads);
     }
     let stdin_is_code = heredoc_body_is_code(&words);
-    for idx in command_start_indices(&words, eff_idx) {
+    let starts = command_start_indices(&words, eff_idx);
+    for (position, &idx) in starts.iter().enumerate() {
         let eff = words.get(idx).map(|w| command_basename(w)).unwrap_or("");
         if !is_shell_or_interpreter(eff) && !stdin_is_code {
             continue;
         }
-        collect_inline_payloads(tokens, eff, idx, stdin_is_code, payloads);
+        let end_idx = starts.get(position + 1).copied().unwrap_or(words.len());
+        collect_inline_payloads(tokens, eff, idx, end_idx, stdin_is_code, payloads);
     }
 }
 
 /// Collect the inline code payloads a single command start hands its interpreter:
 /// `-c`/`-e` values, `eval` arguments, and a here-string body.
+///
+/// The walk stops at `end_idx`, the next command start: arguments past it belong
+/// to that command, and without the bound a segment holding many interpreter
+/// words costs a payload per pair rather than per word.
 fn collect_inline_payloads(
     tokens: &[&ShellToken],
     eff: &str,
     eff_idx: usize,
+    end_idx: usize,
     stdin_is_code: bool,
     payloads: &mut Vec<(PayloadKind, String)>,
 ) {
@@ -510,6 +517,9 @@ fn collect_inline_payloads(
                 }
             }
             ShellToken::Word(w) => {
+                if word_no >= end_idx && !pending_inline_code {
+                    break;
+                }
                 if std::mem::take(&mut pending_inline_code) {
                     payloads.push((PayloadKind::Inline, w.to_string()));
                 } else if word_no > eff_idx && !std::mem::take(&mut pending_option_value) {
@@ -715,9 +725,11 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
     // leaves the nested interpreter's code unscanned above. Recurse just that
     // code, not the runner's own operands, so paths inside it still reach the
     // fence (issue #27).
-    for idx in command_start_indices(&words, eff_idx).into_iter().skip(1) {
+    let starts = command_start_indices(&words, eff_idx);
+    for (position, &idx) in starts.iter().enumerate().skip(1) {
+        let end_idx = starts.get(position + 1).copied().unwrap_or(words.len());
         let mut recurse_next = false;
-        for word in words.iter().skip(idx + 1) {
+        for word in &words[idx + 1..end_idx] {
             if std::mem::take(&mut recurse_next) {
                 extract_paths_inner(word, depth + 1, paths);
             } else if is_code_flag(word) {
@@ -1990,6 +2002,20 @@ mod tests {
         ] {
             assert!(!is_interpreter_obfuscation(cmd), "false positive: {cmd}");
         }
+    }
+
+    #[test]
+    fn test_payload_count_stays_linear_in_command_starts() {
+        // Each command start must claim only its own arguments. Walking every
+        // start to end of segment costs a payload per *pair* of starts, which on
+        // a few thousand words blows past the hook's five-second budget.
+        let cmd = format!("strace {}", "python3 -c x ".repeat(200));
+        let payloads = interpreter_code_payloads(&cmd);
+        assert!(
+            payloads.len() <= 400,
+            "payload count is superlinear: {}",
+            payloads.len()
+        );
     }
 
     #[test]
