@@ -785,15 +785,71 @@ fn command_start_indices(words: &[&str], eff_idx: usize) -> Vec<usize> {
     indices
 }
 
+/// Commands that read standard input as *data*, so a heredoc or here-string they
+/// consume is never a script: `xargs` hands the wrapped command arguments, and
+/// the filters consume the stream themselves. Reaching one of these means the
+/// heredoc is data even when an interpreter is named later on the line
+/// (`grep python3 <<'EOF' … EOF` searches a blob, it does not run python).
+///
+/// Unlike `is_wrapper`, this list is allowed to be finite: an omission here costs
+/// a false prompt on an unusual filter, never a missed payload.
+fn consumes_stdin_as_data(command: &str) -> bool {
+    matches!(
+        command,
+        "xargs"
+            | "grep"
+            | "egrep"
+            | "fgrep"
+            | "rg"
+            | "ag"
+            | "sed"
+            | "awk"
+            | "jq"
+            | "wc"
+            | "sort"
+            | "uniq"
+            | "cut"
+            | "tr"
+            | "head"
+            | "tail"
+            | "column"
+            | "cat"
+            | "tee"
+            | "diff"
+            | "patch"
+            | "xxd"
+            | "od"
+            | "base64"
+            | "md5sum"
+            | "sha1sum"
+            | "sha256sum"
+    )
+}
+
+/// Whether stdin reaches a data consumer rather than the effective command.
+///
+/// `xargs -a file` is the exception: it takes its item list from the file and
+/// leaves the child's stdin attached, so a heredoc there really is the wrapped
+/// command's script.
+fn stdin_is_data_for(words: &[&str], eff_idx: usize) -> bool {
+    let leading = || words.iter().take(eff_idx + 1);
+    let mut consumers = leading().filter(|word| consumes_stdin_as_data(command_basename(word)));
+    let Some(consumer) = consumers.next() else {
+        return false;
+    };
+    if command_basename(consumer) != "xargs" {
+        return true;
+    }
+    !leading().any(|word| {
+        *word == "-a"
+            || word.starts_with("--arg-file")
+            || (word.starts_with("-a") && !word.starts_with("--"))
+    })
+}
+
 fn heredoc_body_is_code(words: &[&str]) -> bool {
     let (eff_idx, split_commands) = resolve_effective_command(words);
-    // `xargs` reads stdin itself and hands the wrapped command *arguments*, so a
-    // heredoc it consumes is argument data — never the wrapped command's script.
-    if words
-        .iter()
-        .take(eff_idx + 1)
-        .any(|word| command_basename(word) == "xargs")
-    {
+    if stdin_is_data_for(words, eff_idx) {
         return false;
     }
     let split_command_reads_stdin = split_commands
@@ -1933,6 +1989,36 @@ mod tests {
             r#"echo "python3 -c 'import os; os.system(chr(108))'" > notes.txt"#,
         ] {
             assert!(!is_interpreter_obfuscation(cmd), "false positive: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_stdin_data_consumers_do_not_make_heredocs_code() {
+        // An interpreter named as an operand of a filter is a search term, not a
+        // command: the heredoc is the blob being filtered.
+        for cmd in [
+            "grep python3 <<'EOF'\nx = eval(compile(src))\nEOF",
+            "grep -c node <<'EOF'\natob('eA==')\nEOF",
+            "wc -l <<'EOF'\nnote: use the b64decode helper\nEOF",
+            "xargs bash -s <<'EOF'\nnote: use the b64decode helper\nEOF",
+        ] {
+            assert!(!is_interpreter_obfuscation(cmd), "false positive: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_xargs_arg_file_leaves_child_stdin_attached() {
+        // With -a/--arg-file, xargs reads items from the file and the child keeps
+        // xargs's stdin, so the heredoc really is the wrapped command's script.
+        for cmd in [
+            "xargs -a args.txt bash -s <<'EOF'\n\
+             python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+             EOF",
+            "xargs --arg-file=args.txt bash -s <<'EOF'\n\
+             python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+             EOF",
+        ] {
+            assert!(is_interpreter_obfuscation(cmd), "not flagged: {cmd}");
         }
     }
 

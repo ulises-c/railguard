@@ -533,14 +533,33 @@ fn xargs_stdin_is_argument_data_not_code() {
          note: use the b64decode helper\n\
          EOF",
         "xargs bash <<< 'note: use the b64decode helper'",
+        "grep python3 <<'EOF'\n\
+         x = eval(compile(src))\n\
+         EOF",
     ] {
         let input = make_bash_input(&unique_session_id(), cwd, command);
         let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
         assert!(
             !output_is_not_allowed(&stdout),
-            "xargs input data was treated as code: {command}\n{stdout}"
+            "stdin data was treated as code: {command}\n{stdout}"
         );
     }
+}
+
+#[test]
+fn xargs_arg_file_heredoc_is_still_a_script() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    let command = "xargs -a args.txt bash -s <<'EOF'\n\
+                   python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+                   EOF";
+    let input = make_bash_input(&unique_session_id(), cwd, command);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "xargs -a hid a heredoc script: {command}\n{stdout}"
+    );
 }
 
 #[test]
