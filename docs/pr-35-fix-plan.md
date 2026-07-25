@@ -1,7 +1,9 @@
 # PR #35 Fix Plan
 
 **Status: all four findings fixed** in `2bf7b5c`, `f129584`, `af97821`,
-`1b97471`. See [Outcome](#outcome) for the post-fix differential replay.
+`1b97471`, then six defects in those fixes corrected in `d32dbf1`, `fae2e97`,
+`0fd2b4e`. See [Outcome](#outcome) for the post-fix differential replay and
+[Review round](#review-round) for what the review of the fixes turned up.
 
 Companion to [`pr-35-code-review.md`](pr-35-code-review.md). All four findings
 were reproduced end-to-end through the `PreToolUse` hook on
@@ -224,6 +226,50 @@ Checks on the fixed branch: `cargo test --locked --all-targets` (343 passing,
 19 new), `cargo clippy --locked --all-targets --all-features -- -D warnings`
 clean, `cargo fmt --all --check` clean, `git diff --check origin/main...HEAD`
 clean.
+
+## Review round
+
+The four fixes were then reviewed twice: by hand against the diff, and by Codex
+against the same commit range. Six defects surfaced, all reproduced end-to-end
+before being fixed, all now covered by tests that fail when the fix is reverted.
+
+Found reviewing the diff by hand:
+
+| Defect | Fix |
+| --- | --- |
+| `xargs -a file` reads its item list from the file and leaves the child's stdin attached, so the heredoc there really is the wrapped script. The P2 fix hid it. | `d32dbf1` |
+| The interpreter retry added for unknown runners also fired on filters, so `grep python3 <<'EOF' … EOF` over a blob containing `eval(` started prompting. | `d32dbf1` |
+| Each command start re-walked the whole segment, so a segment with k interpreter words produced O(k²) payloads: a 5k-word command took 24.8s against 0.18s before, past the hook's 5s budget, where a timeout means the call is never adjudicated. | `fae2e97` |
+
+Found by Codex:
+
+| Defect | Fix |
+| --- | --- |
+| A trailing backslash in an unterminated substitution (`echo "$(foo\`) advanced the index past the end: the final slice panicked and the hook exited 101 without a decision. | `0fd2b4e` |
+| `stdin_is_data_for` scanned raw leading words, so an option *value* sharing a filter's name (`env -u grep bash <<'EOF'`) was read as a data consumer and the script it ran stopped being classified as code. | `0fd2b4e` |
+| A later interpreter word was promoted to a command start even after a command that only prints its arguments, so `printf '%s\n' python3 -c …` prompted. | `0fd2b4e` |
+
+Codex's suggested remedy for the last one was to require a known runner before
+promoting an operand. That was not taken: a runner allowlist is exactly the
+finite list whose gaps produced P1a, and gating on it would reopen that bypass.
+The fix instead names the commands that demonstrably do *not* execute their
+arguments. Both new lists (`consumes_stdin_as_data`, `treats_arguments_as_data`)
+are deliberately finite where `is_wrapper` may not be: an omission in these costs
+a prompt, never a missed payload, which is the opposite polarity from a runner
+list.
+
+### Still open
+
+`bash <(printf '%s' "…")` and `diff <(python3 -c '…') /dev/null` are allowed.
+Process substitution is not parsed as an executable region at all: `<(` lexes as
+a `<` redirection plus a `(` operator. `origin/main` asks on both, so this is a
+regression this PR introduces, in the same class as P1a but in a separate code
+path from the four findings. It is left for a follow-up rather than folded in
+here.
+
+Not a regression, for the record: `cat <<'EOF' … EOF | bash` is allowed on
+`origin/main`, before these fixes, and after them. A heredoc consumed by a filter
+and piped into a shell has never been classified as code.
 
 ## Suggested commit order
 
