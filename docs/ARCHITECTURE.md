@@ -1,29 +1,29 @@
 # Railguard Architecture
 
-Technical reference for engineers and security researchers who want to understand how Railguard works internally. Railguard is a Rust binary that interposes on every Claude Code tool call via the hook system, enforcing policy, detecting evasion, snapshotting files, and logging decisions.
+Technical reference for engineers and security researchers who want to understand how Railguard works internally. Railguard is a Rust binary that interposes on Claude Code and Codex tool calls via their hook systems, enforcing policy, detecting evasion, snapshotting files, and logging decisions.
 
 ---
 
 ## 1. System Overview
 
-### Integration with Claude Code
+### Integration with Claude Code and Codex
 
-Railguard registers itself as a hook handler in `~/.claude/settings.json` for three hook events:
+Railguard registers itself in `~/.claude/settings.json` and, when Codex is installed, `~/.codex/hooks.json` for three hook events:
 
-- **PreToolUse** -- Fires before every tool call (Bash, Write, Edit, Read, etc.). This is the critical enforcement path. Railguard can allow, deny, or escalate to human approval.
+- **PreToolUse** -- Fires before every tool call (Bash, Write, Edit, Read, `apply_patch`, etc.). This is the critical enforcement path. Railguard can allow or deny; Claude Code also supports escalation to human approval.
 - **PostToolUse** -- Fires after every tool call completes. Used for audit logging.
 - **SessionStart** -- Fires when a Claude Code session begins. Used to initialize logging and warn about previously terminated sessions.
 
 ### Protocol
 
-Each hook invocation is a **separate OS process**. Claude Code spawns `railguard hook --event <EventName>` and communicates via JSON on stdin/stdout:
+Each hook invocation is a **separate OS process**. The client spawns `railguard hook --client <client> --event <EventName>` and communicates via JSON on stdin/stdout:
 
 1. Claude Code writes a `HookInput` JSON object to Railguard's stdin, containing `session_id`, `cwd`, `hook_event_name`, `tool_name`, `tool_input`, `tool_use_id`, and optionally `tool_response`.
 2. Railguard reads stdin to EOF, processes the request, and writes a `HookOutput` JSON object to stdout.
-3. Claude Code reads the output and acts on the `permissionDecision` field:
+3. The client reads the output and acts on the `permissionDecision` field:
    - **No output / empty `hookSpecificOutput`** -- Tool call proceeds (allow).
    - `"deny"` -- Tool call is blocked. The `permissionDecisionReason` is shown to the agent.
-   - `"ask"` -- The human is prompted for approval. `additionalContext` is shown in the prompt.
+   - `"ask"` -- Claude Code prompts the human for approval. Codex does not support this value, so Railguard converts approval-required outcomes to actionable denials.
 
 All hook commands have a 5-second timeout configured in the settings registration.
 
@@ -274,14 +274,15 @@ For files that did not exist before (`existed: false`), rollback deletes the fil
 
 `install_hooks()`:
 1. Reads or creates `~/.claude/settings.json`.
-2. Inserts hook entries for PreToolUse, PostToolUse, and SessionStart. Each entry uses `matcher: ""` (matches all tools) and points to `{railguard_binary_path} hook --event {EventName}` with a 5-second timeout.
-3. Injects Railguard instructions into `~/.claude/CLAUDE.md` using marker comments (`<!-- railguard:start -->` / `<!-- railguard:end -->`). This teaches the LLM about rollback commands and blocked operations. If the marker section already exists, it is replaced in-place.
+2. Inserts Claude hook entries for PreToolUse, PostToolUse, and SessionStart with `--client claude` and a 5-second timeout.
+3. If `~/.codex` exists, merges equivalent `--client codex` entries into `~/.codex/hooks.json` and tells the user to review them with `/hooks`.
+4. Injects Railguard instructions into `~/.claude/CLAUDE.md` using marker comments (`<!-- railguard:start -->` / `<!-- railguard:end -->`). This teaches the LLM about rollback commands and blocked operations. If the marker section already exists, it is replaced in-place.
 
 `uninstall_hooks()` has layered anti-tampering protection:
 1. **TTY check** -- `stdin.is_terminal() && stdout.is_terminal()` must be true. Agents pipe stdin, so this rejects automated uninstall attempts.
 2. **Native OS dialog** -- macOS uses `osascript` (AppleScript dialog), Linux tries `zenity` then `kdialog`, Windows uses PowerShell `MessageBox`. An AI agent cannot click a GUI button.
 3. **Terminal fallback** -- If no GUI is available, requires typing "remove" at a prompt.
-4. **Self-protection rules** -- The blocklist blocks `railguard uninstall`, `.claude/settings.json` modification, and railguard binary removal, so the agent cannot even reach the uninstall code path.
+4. **Self-protection rules** -- The blocklist blocks `railguard uninstall`, Claude/Codex hook-setting modification, and railguard binary removal, so the agent cannot even reach the uninstall code path.
 
 ### `configure/` -- Interactive Terminal UI
 
