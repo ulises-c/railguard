@@ -86,6 +86,8 @@ fence:
     - "/etc"
     # Claude Code settings — blocked to prevent agent from disabling Railguard
     - "~/.claude/settings.json"
+    # Codex hooks — blocked to prevent agent from disabling Railguard
+    - "~/.codex/hooks.json"
 
 # ── Trace ────────────────────────────────────────────────────────────
 # Structured audit log of every tool call.

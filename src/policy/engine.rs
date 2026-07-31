@@ -1,4 +1,4 @@
-use crate::block::matcher::evaluate_tool;
+use crate::block::matcher::{evaluate_tool, rule_applies_to_tool};
 use crate::types::{Decision, Policy};
 
 /// Evaluate a tool call against the full policy.
@@ -9,7 +9,7 @@ pub fn evaluate(policy: &Policy, tool_name: &str, tool_input: &serde_json::Value
         let applicable: Vec<_> = policy
             .allowlist
             .iter()
-            .filter(|r| r.tool == tool_name || r.tool == "*")
+            .filter(|r| rule_applies_to_tool(&r.tool, tool_name))
             .cloned()
             .collect();
 

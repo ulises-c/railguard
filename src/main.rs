@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::path::Path;
 
+use railguard::types::HookClient;
 use railguard::{
     configure, context, coord, dashboard, hook, install, memory, policy, replay, snapshot, trace,
     update,
@@ -11,7 +12,7 @@ use railguard::{
 #[command(
     name = "railguard",
     version,
-    about = "A secure runtime for Claude Code."
+    about = "A secure runtime for Claude Code and Codex."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -20,10 +21,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Install railguard hooks into Claude Code
+    /// Install railguard hooks into Claude Code and Codex
     Install,
 
-    /// Remove railguard hooks from Claude Code
+    /// Remove railguard hooks from Claude Code and Codex
     Uninstall,
 
     /// Generate a starter railguard.yaml in the current directory
@@ -36,6 +37,8 @@ enum Commands {
     Hook {
         #[arg(long)]
         event: String,
+        #[arg(long, value_enum, default_value_t = HookClient::Auto)]
+        client: HookClient,
     },
 
     /// Show recent trace logs
@@ -165,7 +168,7 @@ fn main() {
         Some(Commands::Uninstall) => cmd_uninstall(),
         Some(Commands::Init) => cmd_init(),
         Some(Commands::Guide) => cmd_guide(),
-        Some(Commands::Hook { event }) => hook::handler::run(&event),
+        Some(Commands::Hook { event, client }) => hook::handler::run(&event, client),
         Some(Commands::Log { session, count }) => cmd_log(session, count),
         Some(Commands::Rollback {
             id,
@@ -213,7 +216,7 @@ fn cmd_install() -> i32 {
         Ok(msg) => {
             let rule_count = policy::defaults::default_blocklist().len();
 
-            println!("  {} Hooks registered with Claude Code", "✓".green().bold());
+            println!("  {} Hooks registered", "✓".green().bold());
             println!("  {} {}", "✓".green().bold(), msg);
             println!(
                 "  {} {} default rules active",
@@ -542,15 +545,8 @@ fn cmd_status() -> i32 {
     println!("{}", "railguard status".bold());
     println!();
 
-    match install::hooks::check_installed() {
-        Ok(true) => println!("  {} Hooks installed in Claude Code", "✓".green().bold()),
-        Ok(false) => println!(
-            "  {} Hooks not installed (run {})",
-            "✗".yellow().bold(),
-            "railguard install".cyan()
-        ),
-        Err(e) => println!("  {} Could not check hooks: {}", "?".yellow().bold(), e),
-    }
+    print_hook_status("Claude Code", install::hooks::check_claude_installed());
+    print_hook_status("Codex", install::hooks::check_codex_installed());
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let loaded_policy = policy::loader::load_policy_or_defaults(&cwd);
@@ -608,6 +604,24 @@ fn cmd_status() -> i32 {
 
     println!();
     0
+}
+
+fn print_hook_status(client: &str, status: Result<bool, String>) {
+    match status {
+        Ok(true) => println!("  {} {} hooks installed", "✓".green().bold(), client),
+        Ok(false) => println!(
+            "  {} {} hooks not installed (run {})",
+            "✗".yellow().bold(),
+            client,
+            "railguard install".cyan()
+        ),
+        Err(error) => println!(
+            "  {} Could not check {} hooks: {}",
+            "?".yellow().bold(),
+            client,
+            error
+        ),
+    }
 }
 
 fn cmd_locks() -> i32 {

@@ -323,9 +323,9 @@ pub fn default_blocklist() -> Vec<Rule> {
         Rule {
             name: "railguard-tamper-settings".to_string(),
             tool: "Bash".to_string(),
-            pattern: r"\.claude/settings\.json".to_string(),
+            pattern: r"\.(claude/settings|codex/hooks)\.json".to_string(),
             action: "block".to_string(),
-            message: Some("Blocked: agents cannot modify Claude Code hook settings".to_string()),
+            message: Some("Blocked: agents cannot modify Railguard hook settings".to_string()),
         },
         Rule {
             name: "railguard-remove-binary".to_string(),

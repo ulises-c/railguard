@@ -1,6 +1,30 @@
 use serde::{Deserialize, Serialize};
 
-// ── Hook Input (what Claude Code sends on stdin) ──
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum HookClient {
+    Auto,
+    Claude,
+    Codex,
+}
+
+impl HookClient {
+    pub fn resolve(self, input: &HookInput) -> Self {
+        if self != Self::Auto {
+            return self;
+        }
+        if input.model.is_some() {
+            Self::Codex
+        } else {
+            Self::Claude
+        }
+    }
+
+    pub fn supports_interactive_approval(self) -> bool {
+        matches!(self, Self::Claude)
+    }
+}
+
+// ── Hook Input ──
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookInput {
@@ -17,6 +41,8 @@ pub struct HookInput {
     pub tool_response: Option<serde_json::Value>,
     #[serde(default)]
     pub timestamp: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 // ── Hook Output (what we write to stdout) ──
@@ -83,6 +109,20 @@ impl HookOutput {
                 additional_context: Some(context.to_string()),
             }),
         }
+    }
+
+    pub fn approval_required(client: HookClient, context: &str) -> Self {
+        if client.supports_interactive_approval() {
+            return Self::ask(context);
+        }
+
+        let details = context
+            .strip_prefix("🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\n")
+            .unwrap_or(context);
+        Self::deny(&format!(
+            "Railguard requires human approval, but Codex PreToolUse hooks cannot open an approval prompt. This tool call was blocked. Ask the human to update the Railguard policy or allowlist outside Codex, then retry.\n\n{}",
+            details
+        ))
     }
 
     pub fn session_message(message: &str) -> Self {
@@ -172,6 +212,7 @@ impl Default for FenceConfig {
                 "~/.gnupg".to_string(),
                 "~/.config/gcloud".to_string(),
                 "~/.claude".to_string(),
+                "~/.codex/hooks.json".to_string(),
                 "/etc".to_string(),
             ],
             allow_local_overrides: true,
@@ -331,4 +372,52 @@ pub enum Decision {
     Allow,
     Block { rule: String, message: String },
     Approve { rule: String, message: String },
+}
+
+#[cfg(test)]
+mod hook_output_tests {
+    use super::*;
+
+    #[test]
+    fn codex_approval_required_is_a_valid_denial() {
+        let output = HookOutput::approval_required(HookClient::Codex, "Needs approval");
+        let json = serde_json::to_value(output).unwrap();
+
+        assert_eq!(
+            json.pointer("/hookSpecificOutput/permissionDecision"),
+            Some(&serde_json::Value::String("deny".to_string()))
+        );
+        assert!(!json.to_string().contains("\"ask\""));
+    }
+
+    #[test]
+    fn claude_approval_required_keeps_ask() {
+        let output = HookOutput::approval_required(HookClient::Claude, "Needs approval");
+        let json = serde_json::to_value(output).unwrap();
+
+        assert_eq!(
+            json.pointer("/hookSpecificOutput/permissionDecision"),
+            Some(&serde_json::Value::String("ask".to_string()))
+        );
+    }
+
+    #[test]
+    fn auto_client_detects_codex_model_field() {
+        let codex: HookInput = serde_json::from_value(serde_json::json!({
+            "session_id": "session",
+            "cwd": "/project",
+            "hook_event_name": "SessionStart",
+            "model": "gpt-codex"
+        }))
+        .unwrap();
+        let claude: HookInput = serde_json::from_value(serde_json::json!({
+            "session_id": "session",
+            "cwd": "/project",
+            "hook_event_name": "SessionStart"
+        }))
+        .unwrap();
+
+        assert_eq!(HookClient::Auto.resolve(&codex), HookClient::Codex);
+        assert_eq!(HookClient::Auto.resolve(&claude), HookClient::Claude);
+    }
 }

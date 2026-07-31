@@ -3,6 +3,12 @@ use regex::Regex;
 use crate::block::evasion::normalize_command;
 use crate::types::{Decision, Rule};
 
+pub fn rule_applies_to_tool(rule_tool: &str, tool_name: &str) -> bool {
+    rule_tool == "*"
+        || rule_tool == tool_name
+        || (tool_name == "apply_patch" && matches!(rule_tool, "Write" | "Edit"))
+}
+
 /// Match a command against a list of rules.
 /// Normalizes the command first to defeat evasion attempts.
 pub fn match_rules(command: &str, rules: &[Rule]) -> Decision {
@@ -47,7 +53,7 @@ pub fn match_rules(command: &str, rules: &[Rule]) -> Decision {
 pub fn evaluate_tool(tool_name: &str, tool_input: &serde_json::Value, rules: &[Rule]) -> Decision {
     let applicable_rules: Vec<&Rule> = rules
         .iter()
-        .filter(|r| r.tool == tool_name || r.tool == "*")
+        .filter(|r| rule_applies_to_tool(&r.tool, tool_name))
         .collect();
 
     if applicable_rules.is_empty() {
@@ -63,14 +69,15 @@ pub fn evaluate_tool(tool_name: &str, tool_input: &serde_json::Value, rules: &[R
     }
 
     // For Write/Edit/Read tools, match against file_path
-    if matches!(tool_name, "Write" | "Edit" | "Read") {
-        if let Some(path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
+    if matches!(tool_name, "Write" | "Edit" | "Read" | "apply_patch") {
+        let paths = crate::fence::path::extract_file_paths(tool_name, tool_input);
+        if !paths.is_empty() {
             for rule in &applicable_rules {
                 let re = match Regex::new(&rule.pattern) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-                if re.is_match(path) {
+                if paths.iter().any(|path| re.is_match(path)) {
                     let message = rule
                         .message
                         .clone()
@@ -98,9 +105,6 @@ pub fn evaluate_tool(tool_name: &str, tool_input: &serde_json::Value, rules: &[R
     // For tools without dedicated handling, serialize the entire input and match
     let input_str = serde_json::to_string(tool_input).unwrap_or_default();
     for rule in &applicable_rules {
-        if rule.tool != "*" && rule.tool != tool_name {
-            continue;
-        }
         let re = match Regex::new(&rule.pattern) {
             Ok(r) => r,
             Err(_) => continue,
@@ -203,6 +207,22 @@ mod tests {
         });
         let decision = evaluate_tool("Write", &input, &rules);
         assert!(matches!(decision, Decision::Allow));
+    }
+
+    #[test]
+    fn test_codex_apply_patch_uses_write_and_edit_rules() {
+        let rules = vec![Rule {
+            name: "railguard-config-edit".to_string(),
+            tool: "Write".to_string(),
+            pattern: r"railguard\.yaml".to_string(),
+            action: "approve".to_string(),
+            message: None,
+        }];
+        let input = json!({
+            "command": "*** Begin Patch\n*** Update File: railguard.yaml\n@@\n-old\n+new\n*** End Patch"
+        });
+        let decision = evaluate_tool("apply_patch", &input, &rules);
+        assert!(matches!(decision, Decision::Approve { .. }));
     }
 
     #[test]

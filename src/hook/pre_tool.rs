@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::block::evasion;
-use crate::fence::path::{check_path, extract_file_path, PathCheck};
+use crate::fence::path::{check_path, extract_file_paths, PathCheck};
 use crate::memory::guard as memory_guard;
 use crate::policy::engine::evaluate;
 use crate::snapshot::capture::capture_snapshot;
@@ -11,7 +11,9 @@ use crate::threat::classifier::{
 };
 use crate::threat::state::SessionState;
 use crate::trace::logger::log_trace;
-use crate::types::{Decision, HookInput, HookOutput, MemoryDecision, Policy, TraceEntry};
+use crate::types::{
+    Decision, HookClient, HookInput, HookOutput, MemoryDecision, Policy, TraceEntry,
+};
 
 /// Result of handling a PreToolUse event.
 /// If `terminate` is Some, the caller should terminate the session.
@@ -28,17 +30,20 @@ pub struct TerminateRequest {
 
 /// Handle a PreToolUse event.
 /// This is the critical path — every tool call passes through here.
-pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
+pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreToolResult {
     let start = Instant::now();
     let tool_name = input.tool_name.as_deref().unwrap_or("unknown");
     let tool_input = input.tool_input.clone().unwrap_or_default();
+    let file_paths = extract_file_paths(tool_name, &tool_input);
     let cwd = Path::new(&input.cwd);
 
     // Load persistent session state (walk up — the shell cwd persists across
     // tool calls and may have drifted below the project root)
     let state_dir = SessionState::locate_state_dir(cwd, &input.session_id);
     let mut state = SessionState::load(&state_dir, &input.session_id);
-    state.resolve_pending_approval();
+    if client.supports_interactive_approval() {
+        state.resolve_pending_approval();
+    }
     state.increment_tool_call();
 
     // The fence anchors to the session's stable project root, not the per-call
@@ -82,19 +87,24 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             let _ = state.save(&state_dir);
             // Fall through to normal evaluation
         } else {
-            state.set_pending_approval("session-resume");
+            if client.supports_interactive_approval() {
+                state.set_pending_approval("session-resume");
+            }
             let _ = state.save(&state_dir);
             return PreToolResult {
-                output: HookOutput::ask(&format!(
-                    "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
+                output: HookOutput::approval_required(
+                    client,
+                    &format!(
+                        "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
                      \n\
                      This session was previously terminated because:\n\
                      {}\n\
                      \n\
                      Approve to resume this session (threat state will be reset), \
                      or deny to keep it blocked.",
-                    reason
-                )),
+                        reason
+                    ),
+                ),
                 terminate: None,
             };
         }
@@ -140,12 +150,14 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             } else {
                 let keywords = extract_keywords(&command);
                 state.record_block(&command, "behavioral-evasion", keywords, 3);
-                state.set_pending_approval(&pattern_key);
+                if client.supports_interactive_approval() {
+                    state.set_pending_approval(&pattern_key);
+                }
                 let _ = state.save(&state_dir);
 
                 let cmd_preview: String = command.chars().take(120).collect();
                 return PreToolResult {
-                    output: HookOutput::ask(&format!(
+                    output: HookOutput::approval_required(client, &format!(
                         "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
                          \n\
                          Behavioral evasion detected: a previously blocked command was \
@@ -186,12 +198,14 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                     } else {
                         let keywords = extract_keywords(&command);
                         state.record_block(&command, pattern, keywords, 1);
-                        state.set_pending_approval(&pattern_key);
+                        if client.supports_interactive_approval() {
+                            state.set_pending_approval(&pattern_key);
+                        }
                         let _ = state.save(&state_dir);
 
                         let cmd_preview: String = command.chars().take(120).collect();
                         return PreToolResult {
-                            output: HookOutput::ask(&format!(
+                            output: HookOutput::approval_required(client, &format!(
                                 "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
                                  \n\
                                  Evasion pattern detected: {}\n\
@@ -231,12 +245,16 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         // Second occurrence: ask user instead of terminating
                         let keywords = extract_keywords(&command);
                         state.record_block(&command, pattern, keywords, 2);
-                        state.set_pending_approval(&pattern_key);
+                        if client.supports_interactive_approval() {
+                            state.set_pending_approval(&pattern_key);
+                        }
                         let _ = state.save(&state_dir);
 
                         let cmd_preview: String = command.chars().take(120).collect();
                         return PreToolResult {
-                            output: HookOutput::ask(&format!(
+                            output: HookOutput::approval_required(
+                                client,
+                                &format!(
                                 "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
                                  \n\
                                  Repeated suspicious pattern: {}\n\
@@ -247,7 +265,8 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                                 pattern,
                                 cmd_preview,
                                 if command.len() > 120 { "..." } else { "" }
-                            )),
+                            ),
+                            ),
                             terminate: None,
                         };
                     } else {
@@ -285,7 +304,10 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                     paths.into_iter().find(|p| memory_guard::is_memory_path(p))
                 })
         } else {
-            extract_file_path(tool_name, &tool_input).filter(|p| memory_guard::is_memory_path(p))
+            file_paths
+                .iter()
+                .find(|path| memory_guard::is_memory_path(path))
+                .cloned()
         };
 
         if let Some(ref mem_path) = memory_file_path {
@@ -312,25 +334,8 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                     let _ = state.save(&state_dir);
 
                     // Still do snapshot before Write/Edit
-                    if policy.snapshot.enabled
-                        && policy.snapshot.tools.iter().any(|t| t == tool_name)
-                    {
-                        if let Some(file_path) =
-                            tool_input.get("file_path").and_then(|v| v.as_str())
-                        {
-                            // Anchor snapshots at the stable fence_root, not the
-                            // per-call cwd: `railguard rollback` reads them from
-                            // the project root, so a cwd-drifted Write/Edit's
-                            // backup must still land under the project.
-                            let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
-                            let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
-                            let _ = capture_snapshot(
-                                &snap_dir,
-                                &input.session_id,
-                                tool_use_id,
-                                file_path,
-                            );
-                        }
+                    if snapshot_enabled_for(policy, tool_name) {
+                        capture_file_snapshots(input, policy, &fence_root, &file_paths);
                     }
 
                     return PreToolResult {
@@ -366,7 +371,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         start,
                     );
                     return PreToolResult {
-                        output: HookOutput::ask(&format!(
+                        output: HookOutput::approval_required(client, &format!(
                             "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
                              \n\
                              {}\n\
@@ -422,7 +427,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                                 start,
                             );
                             return PreToolResult {
-                                output: HookOutput::ask(&format!(
+                                output: HookOutput::approval_required(client, &format!(
                                     "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
                                      \n\
                                      {}\n\
@@ -438,50 +443,50 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 }
             }
         }
-    } else if let Some(file_path) = extract_file_path(tool_name, &tool_input) {
-        match check_path(&policy.fence, &file_path, &fence_root) {
-            PathCheck::Allow => {}
-            PathCheck::Denied(reason) => {
-                let _ = state.save(&state_dir);
-                log_decision(
-                    input,
-                    policy,
-                    tool_name,
-                    &tool_input,
-                    "block",
-                    Some("path-fence"),
-                    start,
-                );
-                return PreToolResult {
-                    output: HookOutput::deny(&reason),
-                    terminate: None,
-                };
-            }
-            PathCheck::OutsideProject(reason) => {
-                if is_read_only_tool(tool_name) {
-                    // Read-only tools outside project are fine
-                } else {
+    } else {
+        for file_path in &file_paths {
+            match check_path(&policy.fence, file_path, &fence_root) {
+                PathCheck::Allow => {}
+                PathCheck::Denied(reason) => {
                     let _ = state.save(&state_dir);
                     log_decision(
                         input,
                         policy,
                         tool_name,
                         &tool_input,
-                        "approve",
+                        "block",
                         Some("path-fence"),
                         start,
                     );
                     return PreToolResult {
-                        output: HookOutput::ask(&format!(
-                            "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
-                             \n\
-                             {}\n\
-                             \n\
-                             Railguard's path fence requires approval for writes outside the project directory.",
-                            reason
-                        )),
+                        output: HookOutput::deny(&reason),
                         terminate: None,
                     };
+                }
+                PathCheck::OutsideProject(reason) => {
+                    if !is_read_only_tool(tool_name) {
+                        let _ = state.save(&state_dir);
+                        log_decision(
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "approve",
+                            Some("path-fence"),
+                            start,
+                        );
+                        return PreToolResult {
+                            output: HookOutput::approval_required(client, &format!(
+                                "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
+                                 \n\
+                                 {}\n\
+                                 \n\
+                                 Railguard's path fence requires approval for writes outside the project directory.",
+                                reason
+                            )),
+                            terminate: None,
+                        };
+                    }
                 }
             }
         }
@@ -494,8 +499,8 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
     match &decision {
         Decision::Allow => {
             // Coordination: acquire file lock for Write/Edit
-            if matches!(tool_name, "Write" | "Edit") {
-                if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
+            if is_file_edit_tool(tool_name) {
+                for file_path in &file_paths {
                     if let Some(deny_msg) =
                         crate::coord::context::check_file_conflict(file_path, &input.session_id)
                     {
@@ -518,19 +523,8 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             }
 
             // Snapshot before Write/Edit (if enabled)
-            if policy.snapshot.enabled && policy.snapshot.tools.iter().any(|t| t == tool_name) {
-                if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-                    // Anchor snapshots at the stable fence_root (see above): keeps
-                    // backups under the project root that `railguard rollback` reads.
-                    let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
-                    let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
-                    if let Err(e) =
-                        capture_snapshot(&snap_dir, &input.session_id, tool_use_id, file_path)
-                    {
-                        // silently ignore — stderr causes "hook error" in Claude Code
-                        let _ = e;
-                    }
-                }
+            if snapshot_enabled_for(policy, tool_name) {
+                capture_file_snapshots(input, policy, &fence_root, &file_paths);
             }
 
             log_decision(input, policy, tool_name, &tool_input, "allow", None, start);
@@ -577,16 +571,49 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 start,
             );
             PreToolResult {
-                output: HookOutput::ask(&format!(
-                    "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
+                output: HookOutput::approval_required(
+                    client,
+                    &format!(
+                        "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
                      \n\
                      Rule: {} — {}\n\
                      \n\
                      This command matched a Railguard policy rule that requires human approval.",
-                    rule, message
-                )),
+                        rule, message
+                    ),
+                ),
                 terminate: None,
             }
+        }
+    }
+}
+
+fn is_file_edit_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "Write" | "Edit" | "apply_patch")
+}
+
+fn snapshot_enabled_for(policy: &Policy, tool_name: &str) -> bool {
+    policy.snapshot.enabled
+        && (policy.snapshot.tools.iter().any(|tool| tool == tool_name)
+            || (tool_name == "apply_patch"
+                && policy
+                    .snapshot
+                    .tools
+                    .iter()
+                    .any(|tool| matches!(tool.as_str(), "Write" | "Edit"))))
+}
+
+fn capture_file_snapshots(
+    input: &HookInput,
+    policy: &Policy,
+    fence_root: &str,
+    file_paths: &[String],
+) {
+    let snap_dir = Path::new(fence_root).join(&policy.snapshot.directory);
+    let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
+    for file_path in file_paths {
+        if let Err(error) = capture_snapshot(&snap_dir, &input.session_id, tool_use_id, file_path) {
+            let _ = error;
         }
     }
 }
@@ -750,5 +777,74 @@ fn summarize_input(tool_name: &str, tool_input: &serde_json::Value) -> String {
             .chars()
             .take(200)
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FenceConfig, MemoryConfig, SnapshotConfig, TraceConfig};
+    use serde_json::json;
+
+    fn codex_input(cwd: &Path, session_id: &str, command: &str) -> HookInput {
+        HookInput {
+            session_id: session_id.to_string(),
+            cwd: cwd.display().to_string(),
+            hook_event_name: "PreToolUse".to_string(),
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(json!({"command": command})),
+            tool_use_id: Some("call-1".to_string()),
+            tool_response: None,
+            timestamp: None,
+            model: Some("gpt-codex".to_string()),
+        }
+    }
+
+    fn quiet_policy() -> Policy {
+        Policy {
+            version: 1,
+            blocklist: vec![],
+            approve: vec![],
+            allowlist: vec![],
+            fence: FenceConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            trace: TraceConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            snapshot: SnapshotConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            memory: MemoryConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn codex_does_not_auto_approve_after_approval_denial() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = codex_input(dir.path(), "codex-no-auto-approve", "rev <<< x | sh");
+
+        for _ in 0..2 {
+            let result = handle(&input, &quiet_policy(), HookClient::Codex);
+            assert_eq!(
+                result
+                    .output
+                    .hook_specific_output
+                    .unwrap()
+                    .permission_decision,
+                Some("deny".to_string())
+            );
+        }
+
+        let state_dir = SessionState::locate_state_dir(dir.path(), &input.session_id);
+        let state = SessionState::load(&state_dir, &input.session_id);
+        assert!(state.session_approvals.is_empty());
+        assert!(state.pending_approval.is_none());
     }
 }

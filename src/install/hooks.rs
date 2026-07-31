@@ -2,10 +2,17 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::types::HookClient;
+
 /// Get the path to Claude Code's user settings file.
 pub fn claude_settings_path() -> PathBuf {
     let home = dirs::home_dir().expect("Could not determine home directory");
     home.join(".claude").join("settings.json")
+}
+
+pub fn codex_hooks_path() -> PathBuf {
+    let home = dirs::home_dir().expect("Could not determine home directory");
+    home.join(".codex").join("hooks.json")
 }
 
 /// Get the path to the railguard binary.
@@ -85,9 +92,15 @@ pub fn disable_bypass_permissions() -> Result<String, String> {
 /// True if a hooks-array entry invokes railguard.
 fn is_railguard_entry(entry: &Value) -> bool {
     entry
-        .pointer("/hooks/0/command")
-        .and_then(|c| c.as_str())
-        .is_some_and(|c| c.contains("railguard"))
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| {
+            hooks.iter().any(|hook| {
+                hook.get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| command.contains("railguard"))
+            })
+        })
 }
 
 /// Add a railguard entry to an event's hook array, replacing any stale
@@ -116,17 +129,7 @@ pub fn install_hooks() -> Result<String, String> {
 
     let hooks_obj = hooks.as_object_mut().ok_or("hooks is not a JSON object")?;
 
-    for event in ["PreToolUse", "PostToolUse", "SessionStart"] {
-        let entry = json!({
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": format!("{} hook --event {}", binary, event),
-                "timeout": 5
-            }]
-        });
-        upsert_hook_entry(hooks_obj, event, entry);
-    }
+    upsert_client_hooks(hooks_obj, &binary, HookClient::Claude);
 
     // Set CLAUDE_CODE_SHELL to railguard-shell for OS-level sandboxing.
     // This makes every Bash tool call run through our sandboxed shell.
@@ -145,6 +148,8 @@ pub fn install_hooks() -> Result<String, String> {
 
     write_settings(&settings_path, &settings)?;
 
+    let codex_msg = install_codex_hooks(&binary)?;
+
     // Inject CLAUDE.md so Claude knows about Railguard
     let claude_md_msg = inject_claude_md()?;
 
@@ -155,11 +160,63 @@ pub fn install_hooks() -> Result<String, String> {
     };
 
     Ok(format!(
-        "Installed railguard hooks in {}\n  {} {}{}",
+        "Installed railguard hooks in {}\n  {} {}{}\n  {}",
         settings_path.display(),
         "✓",
         claude_md_msg,
-        sandbox_msg
+        sandbox_msg,
+        codex_msg
+    ))
+}
+
+fn upsert_client_hooks(
+    hooks_obj: &mut serde_json::Map<String, Value>,
+    binary: &str,
+    client: HookClient,
+) {
+    let client_name = match client {
+        HookClient::Auto => "auto",
+        HookClient::Claude => "claude",
+        HookClient::Codex => "codex",
+    };
+
+    for event in ["PreToolUse", "PostToolUse", "SessionStart"] {
+        let entry = json!({
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": format!("{} hook --client {} --event {}", binary, client_name, event),
+                "timeout": 5
+            }]
+        });
+        upsert_hook_entry(hooks_obj, event, entry);
+    }
+}
+
+fn install_codex_hooks(binary: &str) -> Result<String, String> {
+    let hooks_path = codex_hooks_path();
+    let codex_dir = hooks_path
+        .parent()
+        .ok_or("Could not determine Codex config directory")?;
+    if !codex_dir.exists() {
+        return Ok("● Codex not detected; skipped ~/.codex/hooks.json".to_string());
+    }
+
+    let mut settings = read_settings(&hooks_path)?;
+    let hooks = settings
+        .as_object_mut()
+        .ok_or("Codex hooks file is not a JSON object")?
+        .entry("hooks")
+        .or_insert_with(|| json!({}));
+    let hooks_obj = hooks
+        .as_object_mut()
+        .ok_or("Codex hooks field is not a JSON object")?;
+    upsert_client_hooks(hooks_obj, binary, HookClient::Codex);
+    write_settings(&hooks_path, &settings)?;
+
+    Ok(format!(
+        "✓ Codex hooks: {} (review them with /hooks)",
+        hooks_path.display()
     ))
 }
 
@@ -268,46 +325,59 @@ pub fn uninstall_hooks() -> Result<String, String> {
 
     let settings_path = claude_settings_path();
 
-    if !settings_path.exists() {
-        return Ok("No Claude Code settings found, nothing to uninstall".to_string());
-    }
+    if settings_path.exists() {
+        let mut settings = read_settings(&settings_path)?;
 
-    let mut settings = read_settings(&settings_path)?;
+        remove_railguard_hooks(&mut settings);
 
-    if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-        // Remove only hooks that reference railguard
-        for event in &["PreToolUse", "PostToolUse", "SessionStart"] {
-            if let Some(event_hooks) = hooks.get_mut(*event) {
-                if let Some(arr) = event_hooks.as_array_mut() {
-                    arr.retain(|entry| !is_railguard_entry(entry));
-                    if arr.is_empty() {
-                        hooks.remove(*event);
-                    }
-                }
+        // Remove CLAUDE_CODE_SHELL from env section
+        if let Some(env_obj) = settings.get_mut("env").and_then(|e| e.as_object_mut()) {
+            env_obj.remove("CLAUDE_CODE_SHELL");
+            if env_obj.is_empty() {
+                settings.as_object_mut().unwrap().remove("env");
             }
         }
+
+        write_settings(&settings_path, &settings)?;
+
+        // Disable bypass permissions — without Railguard, use built-in permissions
+        let _ = disable_bypass_permissions();
+
+        // Clean up CLAUDE.md
+        remove_claude_md_section();
     }
 
-    // Remove CLAUDE_CODE_SHELL from env section
-    if let Some(env_obj) = settings.get_mut("env").and_then(|e| e.as_object_mut()) {
-        env_obj.remove("CLAUDE_CODE_SHELL");
-        if env_obj.is_empty() {
-            settings.as_object_mut().unwrap().remove("env");
-        }
+    let codex_path = codex_hooks_path();
+    if codex_path.exists() {
+        let mut codex_hooks = read_settings(&codex_path)?;
+        remove_railguard_hooks(&mut codex_hooks);
+        write_settings(&codex_path, &codex_hooks)?;
     }
-
-    write_settings(&settings_path, &settings)?;
-
-    // Disable bypass permissions — without Railguard, use built-in permissions
-    let _ = disable_bypass_permissions();
-
-    // Clean up CLAUDE.md
-    remove_claude_md_section();
 
     Ok(format!(
-        "Removed railguard hooks from {}",
-        settings_path.display()
+        "Removed railguard hooks from {} and {}",
+        settings_path.display(),
+        codex_path.display()
     ))
+}
+
+fn remove_railguard_hooks(settings: &mut Value) {
+    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return;
+    };
+
+    for event in ["PreToolUse", "PostToolUse", "SessionStart"] {
+        let remove_event = hooks
+            .get_mut(event)
+            .and_then(Value::as_array_mut)
+            .is_some_and(|entries| {
+                entries.retain(|entry| !is_railguard_entry(entry));
+                entries.is_empty()
+            });
+        if remove_event {
+            hooks.remove(event);
+        }
+    }
 }
 
 /// Remove Railguard section from CLAUDE.md during uninstall.
@@ -449,26 +519,27 @@ fn show_terminal_confirmation() -> Result<bool, String> {
 
 /// Check if railguard hooks are currently installed.
 pub fn check_installed() -> Result<bool, String> {
-    let settings_path = claude_settings_path();
-    if !settings_path.exists() {
+    Ok(check_claude_installed()? || check_codex_installed()?)
+}
+
+pub fn check_claude_installed() -> Result<bool, String> {
+    check_client_installed(&claude_settings_path())
+}
+
+pub fn check_codex_installed() -> Result<bool, String> {
+    check_client_installed(&codex_hooks_path())
+}
+
+fn check_client_installed(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
         return Ok(false);
     }
 
-    let settings = read_settings(&settings_path)?;
-
-    if let Some(hooks) = settings.get("hooks").and_then(|h| h.as_object()) {
-        if let Some(pre) = hooks.get("PreToolUse").and_then(|v| v.as_array()) {
-            for entry in pre {
-                if let Some(cmd) = entry.pointer("/hooks/0/command").and_then(|c| c.as_str()) {
-                    if cmd.contains("railguard") {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(false)
+    let settings = read_settings(path)?;
+    Ok(settings
+        .pointer("/hooks/PreToolUse")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| entries.iter().any(is_railguard_entry)))
 }
 
 fn read_settings(path: &Path) -> Result<Value, String> {
@@ -613,5 +684,44 @@ mod tests {
             json!({"matcher": "", "hooks": [{"type": "command", "command": "railguard hook --event SessionStart"}]}),
         );
         assert_eq!(hooks_obj["SessionStart"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn codex_hooks_use_explicit_client_and_seconds_timeout() {
+        let mut hooks = json!({});
+        upsert_client_hooks(
+            hooks.as_object_mut().unwrap(),
+            "/bin/railguard",
+            HookClient::Codex,
+        );
+
+        for event in ["PreToolUse", "PostToolUse", "SessionStart"] {
+            let hook = &hooks[event][0]["hooks"][0];
+            assert_eq!(hook["timeout"], 5);
+            assert_eq!(
+                hook["command"],
+                format!("/bin/railguard hook --client codex --event {}", event)
+            );
+        }
+    }
+
+    #[test]
+    fn remove_hooks_preserves_non_railguard_entries() {
+        let mut settings = json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"hooks": [{"type": "command", "command": "custom-check"}]},
+                    {"hooks": [{"type": "command", "command": "railguard hook --client codex --event PreToolUse"}]}
+                ]
+            }
+        });
+
+        remove_railguard_hooks(&mut settings);
+
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "custom-check"
+        );
     }
 }

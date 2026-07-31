@@ -35,7 +35,12 @@ pub fn check_path(config: &FenceConfig, file_path: &str, cwd: &str) -> PathCheck
     }
 
     let expanded = expand_path(file_path);
-    let canonical = canonicalize_best_effort(&expanded);
+    let resolved = if Path::new(&expanded).is_absolute() {
+        expanded
+    } else {
+        Path::new(cwd).join(expanded).display().to_string()
+    };
+    let canonical = canonicalize_best_effort(&resolved);
     let cwd_canonical = canonicalize_best_effort(cwd);
 
     // Check explicit denied paths first (canonicalize each)
@@ -150,18 +155,50 @@ fn path_starts_with(path: &str, prefix: &str) -> bool {
 
 /// Extract the file path from a tool input, regardless of tool type.
 pub fn extract_file_path(tool_name: &str, tool_input: &serde_json::Value) -> Option<String> {
+    extract_file_paths(tool_name, tool_input).into_iter().next()
+}
+
+pub fn extract_file_paths(tool_name: &str, tool_input: &serde_json::Value) -> Vec<String> {
     match tool_name {
         "Write" | "Edit" | "Read" => tool_input
             .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default(),
+        "apply_patch" => tool_input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(extract_paths_from_patch)
+            .unwrap_or_default(),
         "Bash" => {
-            // Try to extract paths from common file-touching commands
-            let cmd = tool_input.get("command").and_then(|v| v.as_str())?;
-            extract_path_from_command(cmd)
+            let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) else {
+                return vec![];
+            };
+            extract_path_from_command(cmd).into_iter().collect()
         }
-        _ => None,
+        _ => vec![],
     }
+}
+
+fn extract_paths_from_patch(patch: &str) -> Vec<String> {
+    const PREFIXES: &[&str] = &[
+        "*** Add File: ",
+        "*** Update File: ",
+        "*** Delete File: ",
+        "*** Move to: ",
+    ];
+
+    patch
+        .lines()
+        .filter_map(|line| {
+            PREFIXES
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 /// Best-effort extraction of file paths from shell commands.
@@ -229,6 +266,15 @@ mod tests {
         let config = default_fence("/project");
         assert_eq!(
             check_path(&config, "/project/src/main.rs", "/project"),
+            PathCheck::Allow
+        );
+    }
+
+    #[test]
+    fn test_relative_project_path_allowed() {
+        let config = default_fence("/project");
+        assert_eq!(
+            check_path(&config, "src/main.rs", "/project"),
             PathCheck::Allow
         );
     }
@@ -348,6 +394,17 @@ mod tests {
         assert_eq!(
             extract_file_path("Read", &input),
             Some("/etc/passwd".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_file_paths_from_codex_patch() {
+        let input = serde_json::json!({
+            "command": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** Add File: tests/new.rs\n+test\n*** Delete File: old.txt\n*** End Patch"
+        });
+        assert_eq!(
+            extract_file_paths("apply_patch", &input),
+            vec!["src/main.rs", "tests/new.rs", "old.txt"]
         );
     }
 }

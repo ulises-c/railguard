@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use crate::fence::path::extract_file_paths;
 use crate::trace::logger::log_trace;
 use crate::types::{HookInput, Policy, TraceEntry};
 
@@ -52,9 +53,9 @@ pub fn handle(input: &HookInput, policy: &Policy) {
     }
 
     // Update heartbeat on file locks for Write/Edit
-    if matches!(tool_name, "Write" | "Edit") {
-        if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-            crate::coord::lock::heartbeat(file_path, &input.session_id);
+    if matches!(tool_name, "Write" | "Edit" | "apply_patch") {
+        for file_path in extract_file_paths(tool_name, &tool_input) {
+            crate::coord::lock::heartbeat(&file_path, &input.session_id);
         }
     }
 }
