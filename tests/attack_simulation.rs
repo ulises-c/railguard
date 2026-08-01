@@ -542,6 +542,45 @@ fn safe_write_in_project_allowed() {
     );
 }
 
+#[test]
+fn unwritable_lock_state_denies_without_recursing() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let state_blocker = dir.path().join("not-a-directory");
+    std::fs::write(&state_blocker, "block nested state writes").unwrap();
+    let target = dir.path().join("safe.txt");
+    let input = make_write_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        target.to_str().unwrap(),
+    );
+
+    let mut child = Command::new(railguard_binary())
+        .arg("hook")
+        .arg("--client")
+        .arg("codex")
+        .arg("--event")
+        .arg("PreToolUse")
+        .env("RAILGUARD_HOME", &state_blocker)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "hook crashed: {output:?}");
+    assert!(
+        output_contains_deny(&stdout),
+        "lock-state failure should deny instead of crashing: {stdout}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // 5. POLICY CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════
