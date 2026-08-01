@@ -144,7 +144,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                 );
                 let _ = state.save(&state_dir);
                 return PreToolResult {
-                    output: HookOutput::allow(),
+                    output: HookOutput::allow_for(client),
                     terminate: None,
                 };
             } else {
@@ -192,7 +192,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                         let _ = state.save(&state_dir);
                         let _ = state.save(&state_dir);
                         return PreToolResult {
-                            output: HookOutput::allow(),
+                            output: HookOutput::allow_for(client),
                             terminate: None,
                         };
                     } else {
@@ -238,7 +238,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                         );
                         let _ = state.save(&state_dir);
                         return PreToolResult {
-                            output: HookOutput::allow(),
+                            output: HookOutput::allow_for(client),
                             terminate: None,
                         };
                     } else if state.warning_count >= 1 {
@@ -339,7 +339,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                     }
 
                     return PreToolResult {
-                        output: HookOutput::allow(),
+                        output: HookOutput::allow_for(client),
                         terminate: None,
                     };
                 }
@@ -530,7 +530,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
             log_decision(input, policy, tool_name, &tool_input, "allow", None, start);
             let _ = state.save(&state_dir);
             PreToolResult {
-                output: HookOutput::allow(),
+                output: HookOutput::allow_for(client),
                 terminate: None,
             }
         }

@@ -67,10 +67,12 @@ pub struct HookSpecificOutput {
 }
 
 impl HookOutput {
-    /// Explicitly allow a PreToolUse tool call.
-    /// Returns a permission_decision of "allow" so Claude Code doesn't
-    /// fall back to its default confirmation prompt.
-    pub fn allow() -> Self {
+    /// Allow a PreToolUse tool call using the response shape each client accepts.
+    pub fn allow_for(client: HookClient) -> Self {
+        if client == HookClient::Codex {
+            return Self::noop();
+        }
+
         HookOutput {
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: "PreToolUse".to_string(),
@@ -388,6 +390,25 @@ mod hook_output_tests {
             Some(&serde_json::Value::String("deny".to_string()))
         );
         assert!(!json.to_string().contains("\"ask\""));
+    }
+
+    #[test]
+    fn codex_allow_omits_the_unsupported_decision() {
+        let output = HookOutput::allow_for(HookClient::Codex);
+        let json = serde_json::to_value(output).unwrap();
+
+        assert_eq!(json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn claude_allow_keeps_the_explicit_decision() {
+        let output = HookOutput::allow_for(HookClient::Claude);
+        let json = serde_json::to_value(output).unwrap();
+
+        assert_eq!(
+            json.pointer("/hookSpecificOutput/permissionDecision"),
+            Some(&serde_json::Value::String("allow".to_string()))
+        );
     }
 
     #[test]
