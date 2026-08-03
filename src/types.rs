@@ -220,7 +220,7 @@ impl Default for FenceConfig {
                 "~/.gnupg".to_string(),
                 "~/.config/gcloud".to_string(),
                 "~/.claude".to_string(),
-                "~/.codex/hooks.json".to_string(),
+                "~/.codex".to_string(),
                 "/etc".to_string(),
             ],
             allow_local_overrides: true,

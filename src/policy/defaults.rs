@@ -323,9 +323,20 @@ pub fn default_blocklist() -> Vec<Rule> {
         Rule {
             name: "railguard-tamper-settings".to_string(),
             tool: "Bash".to_string(),
-            pattern: r"\.(claude/settings|codex/hooks)\.json".to_string(),
+            pattern: r"\.(claude/settings\.json|codex/(hooks\.json|config\.toml))".to_string(),
             action: "block".to_string(),
             message: Some("Blocked: agents cannot modify Railguard hook settings".to_string()),
+        },
+        // Codex reads hook trust state and the `hooks` feature flag from
+        // config.toml, so disabling hooks there neutralizes Railguard without
+        // touching hooks.json.
+        Rule {
+            name: "railguard-tamper-codex-hooks-flag".to_string(),
+            tool: "Bash".to_string(),
+            pattern: r"(--disable[= ]hooks|hooks\s*=\s*false|--dangerously-bypass-hook-trust)"
+                .to_string(),
+            action: "block".to_string(),
+            message: Some("Blocked: agents cannot disable Codex hooks".to_string()),
         },
         Rule {
             name: "railguard-remove-binary".to_string(),

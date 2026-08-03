@@ -77,7 +77,7 @@ fence:
     - "~/.aws"
     - "~/.gnupg"
     - "~/.config/gcloud"
-    - "~/.codex/hooks.json"
+    - "~/.codex"
     - "/etc"
 
 # ── Trace ────────────────────────────────────────────────────────────
