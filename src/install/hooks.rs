@@ -22,6 +22,24 @@ fn railguard_binary_path() -> String {
         .unwrap_or_else(|_| "railguard".to_string())
 }
 
+/// Quote a path for the shell that runs hook commands.
+///
+/// Hook commands are executed through a shell, so an install path containing a
+/// space would otherwise split into a bogus program name. The hook then fails to
+/// spawn — and a failed PreToolUse hook does not block the tool call, so an
+/// unquoted path silently disables enforcement.
+fn shell_quote(value: &str) -> String {
+    let safe = !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '/' | '.' | '_' | '-' | '+' | ':' | '=' | '@' | '%' | ',')
+        });
+    if safe {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 /// Get the path to the railguard-shell binary (sibling of the railguard binary).
 fn railguard_shell_path() -> String {
     std::env::current_exe()
@@ -89,18 +107,58 @@ pub fn disable_bypass_permissions() -> Result<String, String> {
     Ok("Disabled bypass permissions mode".to_string())
 }
 
-/// True if a hooks-array entry invokes railguard.
+/// The leading program of a hook command, with surrounding quotes removed.
+fn program_token(command: &str) -> &str {
+    let trimmed = command.trim_start();
+    for quote in ['"', '\''] {
+        if let Some(rest) = trimmed.strip_prefix(quote) {
+            return rest.split(quote).next().unwrap_or_default();
+        }
+    }
+    trimmed.split_whitespace().next().unwrap_or_default()
+}
+
+/// True if a single hook handler invokes railguard's own hook entry point.
+///
+/// Matched on the program's file name rather than a substring search: a
+/// bare `contains("railguard")` also matches unrelated commands that merely
+/// live under a path containing the word, and deleting those on uninstall
+/// would silently remove someone else's hook.
+fn is_railguard_hook(hook: &Value) -> bool {
+    hook.get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|command| {
+            let program = Path::new(program_token(command))
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            matches!(program.as_str(), "railguard" | "railguard.exe") && command.contains(" hook")
+        })
+}
+
+/// True if a hooks-array entry is entirely railguard's.
+///
+/// A matcher group may hold several handlers. Only a group whose handlers are
+/// *all* railguard's may be removed wholesale; a mixed group is pruned handler
+/// by handler so a co-located third-party hook survives.
 fn is_railguard_entry(entry: &Value) -> bool {
     entry
         .get("hooks")
         .and_then(Value::as_array)
-        .is_some_and(|hooks| {
-            hooks.iter().any(|hook| {
-                hook.get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|command| command.contains("railguard"))
-            })
-        })
+        .is_some_and(|hooks| !hooks.is_empty() && hooks.iter().all(is_railguard_hook))
+}
+
+/// Drop railguard handlers from every entry, then drop entries left empty.
+fn prune_railguard_handlers(entries: &mut Vec<Value>) {
+    for entry in entries.iter_mut() {
+        if let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
+            handlers.retain(|hook| !is_railguard_hook(hook));
+        }
+    }
+    entries.retain(|entry| match entry.get("hooks").and_then(Value::as_array) {
+        Some(handlers) => !handlers.is_empty(),
+        None => true,
+    });
 }
 
 /// Add a railguard entry to an event's hook array, replacing any stale
@@ -111,7 +169,7 @@ fn upsert_hook_entry(hooks_obj: &mut serde_json::Map<String, Value>, event: &str
         *event_hooks = json!([]);
     }
     let arr = event_hooks.as_array_mut().unwrap();
-    arr.retain(|e| !is_railguard_entry(e));
+    prune_railguard_handlers(arr);
     arr.push(entry);
 }
 
@@ -180,13 +238,18 @@ fn upsert_client_hooks(
         HookClient::Codex => "codex",
     };
 
+    // A hook that times out is treated as a failed run and does NOT block the
+    // tool call, so the budget has to cover the worst case (a patch touching
+    // many files), not the typical one.
+    let timeout_secs = 60;
+
     for event in ["PreToolUse", "PostToolUse", "SessionStart"] {
         let entry = json!({
             "matcher": "",
             "hooks": [{
                 "type": "command",
-                "command": format!("{} hook --client {} --event {}", binary, client_name, event),
-                "timeout": 5
+                "command": format!("{} hook --client {} --event {}", shell_quote(binary), client_name, event),
+                "timeout": timeout_secs
             }]
         });
         upsert_hook_entry(hooks_obj, event, entry);
@@ -371,7 +434,7 @@ fn remove_railguard_hooks(settings: &mut Value) {
             .get_mut(event)
             .and_then(Value::as_array_mut)
             .is_some_and(|entries| {
-                entries.retain(|entry| !is_railguard_entry(entry));
+                prune_railguard_handlers(entries);
                 entries.is_empty()
             });
         if remove_event {
@@ -697,12 +760,68 @@ mod tests {
 
         for event in ["PreToolUse", "PostToolUse", "SessionStart"] {
             let hook = &hooks[event][0]["hooks"][0];
-            assert_eq!(hook["timeout"], 5);
+            assert_eq!(hook["timeout"], 60);
             assert_eq!(
                 hook["command"],
                 format!("/bin/railguard hook --client codex --event {}", event)
             );
         }
+    }
+
+    #[test]
+    fn remove_hooks_keeps_third_party_handler_sharing_a_group() {
+        let mut settings = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": "railguard hook --client codex --event PreToolUse"},
+                        {"type": "command", "command": "/opt/company/dlp-check"}
+                    ]
+                }]
+            }
+        });
+
+        remove_railguard_hooks(&mut settings);
+
+        let handlers = settings["hooks"]["PreToolUse"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0]["command"], "/opt/company/dlp-check");
+    }
+
+    #[test]
+    fn unrelated_command_containing_railguard_is_not_removed() {
+        let mut settings = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "hooks": [{"type": "command", "command": "/opt/railguardian/scan --all"}]
+                }]
+            }
+        });
+
+        remove_railguard_hooks(&mut settings);
+
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn install_path_with_spaces_is_quoted() {
+        let mut hooks = json!({});
+        upsert_client_hooks(
+            hooks.as_object_mut().unwrap(),
+            "/Applications/Rail Guard/railguard",
+            HookClient::Codex,
+        );
+
+        let command = hooks["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(command.starts_with("'/Applications/Rail Guard/railguard'"));
+        // The quoted form must still be recognized as ours, or uninstall and
+        // reinstall would leave duplicate entries behind.
+        assert!(is_railguard_entry(&hooks["PreToolUse"][0]));
     }
 
     #[test]
