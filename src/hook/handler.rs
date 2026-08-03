@@ -111,10 +111,11 @@ pub fn run(event: &str, client: HookClient) -> i32 {
 /// (the fact we're running means Claude Code is calling us — don't block).
 fn check_hook_integrity(client: HookClient) -> Option<HookOutput> {
     let home = dirs::home_dir()?;
+    // `resolve` never yields Auto, but treat it as Claude rather than skipping
+    // the check — an unresolved client must not silently disable self-integrity.
     let settings_path = match client {
-        HookClient::Auto => return None,
-        HookClient::Claude => home.join(".claude").join("settings.json"),
         HookClient::Codex => home.join(".codex").join("hooks.json"),
+        HookClient::Claude | HookClient::Auto => home.join(".claude").join("settings.json"),
     };
 
     let content = std::fs::read_to_string(&settings_path).ok()?;

@@ -47,6 +47,10 @@ pub struct HookInput {
 
 // ── Hook Output (what we write to stdout) ──
 
+/// Prefix every approval prompt opens with. Shared so the Codex denial path can
+/// strip it back off without the two copies drifting apart.
+pub const ASK_BANNER: &str = "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\n";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookOutput {
@@ -124,9 +128,7 @@ impl HookOutput {
             return Self::ask(context);
         }
 
-        let details = context
-            .strip_prefix("🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\n")
-            .unwrap_or(context);
+        let details = context.strip_prefix(ASK_BANNER).unwrap_or(context);
         Self::deny(&format!(
             "Railguard requires human approval, but Codex PreToolUse hooks cannot open an approval prompt. This tool call was blocked. Ask the human to update the Railguard policy or allowlist outside Codex, then retry.\n\n{}",
             details

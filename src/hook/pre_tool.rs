@@ -494,10 +494,16 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
         Decision::Allow => {
             // Coordination: acquire file lock for Write/Edit
             if is_file_edit_tool(tool_name) {
+                let mut acquired: Vec<&String> = Vec::new();
                 for file_path in &file_paths {
                     if let Some(deny_msg) =
                         crate::coord::context::check_file_conflict(file_path, &input.session_id)
                     {
+                        // The call is being denied, so release what this patch
+                        // already locked instead of stranding those files.
+                        for locked in acquired {
+                            crate::coord::lock::release(locked, &input.session_id);
+                        }
                         log_decision(
                             input,
                             policy,
@@ -513,6 +519,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                             terminate: None,
                         };
                     }
+                    acquired.push(file_path);
                 }
             }
 
@@ -761,11 +768,16 @@ fn summarize_input(tool_name: &str, tool_input: &serde_json::Value) -> String {
             .chars()
             .take(200)
             .collect(),
-        "Write" | "Edit" | "Read" => tool_input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(unknown path)")
-            .to_string(),
+        // Log paths only, never the patch body — a patch carries file contents,
+        // and the trace is a long-lived audit log.
+        "Write" | "Edit" | "Read" | "apply_patch" => {
+            let paths = extract_file_paths(tool_name, tool_input);
+            if paths.is_empty() {
+                "(unknown path)".to_string()
+            } else {
+                paths.join(", ")
+            }
+        }
         _ => serde_json::to_string(tool_input)
             .unwrap_or_default()
             .chars()
