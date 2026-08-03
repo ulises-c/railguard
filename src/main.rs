@@ -41,6 +41,13 @@ enum Commands {
         client: HookClient,
     },
 
+    /// Clear a terminated session so it can run again
+    Resume {
+        /// Session to clear; omit to clear every terminated session here
+        #[arg(long)]
+        session: Option<String>,
+    },
+
     /// Show recent trace logs
     Log {
         /// Show traces for a specific session
@@ -169,6 +176,7 @@ fn main() {
         Some(Commands::Init) => cmd_init(),
         Some(Commands::Guide) => cmd_guide(),
         Some(Commands::Hook { event, client }) => hook::handler::run(&event, client),
+        Some(Commands::Resume { session }) => cmd_resume(session),
         Some(Commands::Log { session, count }) => cmd_log(session, count),
         Some(Commands::Rollback {
             id,
@@ -361,6 +369,56 @@ fn cmd_init() -> i32 {
 
 fn cmd_guide() -> i32 {
     print!("{}", include_str!("../defaults/GUIDE.md"));
+    0
+}
+
+fn cmd_resume(session: Option<String>) -> i32 {
+    use railguard::threat::state::SessionState;
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let state_dir = match &session {
+        Some(id) => SessionState::locate_state_dir(&cwd, id),
+        None => SessionState::find_project_root(&cwd).join(".railguard/state"),
+    };
+
+    let mut cleared: Vec<String> = Vec::new();
+
+    match session {
+        Some(id) => {
+            let mut state = SessionState::load(&state_dir, &id);
+            if !state.terminated {
+                println!("  {} Session {} is not terminated", "●".cyan().bold(), id);
+                return 0;
+            }
+            state.clear_termination();
+            if let Err(e) = state.save(&state_dir) {
+                eprintln!("  {} Could not clear {}: {}", "✗".red().bold(), id, e);
+                return 1;
+            }
+            cleared.push(id);
+        }
+        None => {
+            for mut state in SessionState::find_recent_terminations(&state_dir) {
+                let id = state.session_id.clone();
+                state.clear_termination();
+                match state.save(&state_dir) {
+                    Ok(()) => cleared.push(id),
+                    Err(e) => eprintln!("  {} Could not clear {}: {}", "✗".red().bold(), id, e),
+                }
+            }
+        }
+    }
+
+    if cleared.is_empty() {
+        println!("  {} No terminated sessions to resume", "●".cyan().bold());
+        return 0;
+    }
+
+    for id in &cleared {
+        println!("  {} Resumed session {}", "✓".green().bold(), id);
+    }
+    println!();
+    println!("  Threat state was reset. Re-run the agent; it will start from a clean slate.");
     0
 }
 

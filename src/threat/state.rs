@@ -305,6 +305,22 @@ impl SessionState {
         self.termination_timestamp = Some(chrono::Utc::now().to_rfc3339());
     }
 
+    /// Clear a termination along with the threat history behind it.
+    ///
+    /// This is the only recovery path for a client that cannot answer an
+    /// interactive approval prompt: Codex hooks can't ask, so a terminated
+    /// Codex session would otherwise stay blocked forever.
+    pub fn clear_termination(&mut self) {
+        self.terminated = false;
+        self.termination_reason = None;
+        self.termination_timestamp = None;
+        self.suspicion_level = 0;
+        self.warning_count = 0;
+        self.block_history.clear();
+        self.heightened_keywords.clear();
+        self.pending_approval = None;
+    }
+
     /// Check all state files for recently terminated sessions.
     pub fn find_recent_terminations(state_dir: &Path) -> Vec<SessionState> {
         let mut terminated = Vec::new();
@@ -605,6 +621,31 @@ mod tests {
         state.save(dir.path()).unwrap();
         let loaded = SessionState::load(dir.path(), "anchor-test");
         assert_eq!(loaded.project_root.as_deref(), Some("/repo"));
+    }
+
+    #[test]
+    fn test_clear_termination_restores_a_clean_slate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = SessionState::new("stuck");
+        state.record_block("rev <<< x | sh", "evasion", vec!["sh".to_string()], 3);
+        state.set_pending_approval("evasion");
+        state.mark_terminated("evasion detected");
+        state.save(dir.path()).unwrap();
+
+        let mut reloaded = SessionState::load(dir.path(), "stuck");
+        assert!(reloaded.terminated);
+        reloaded.clear_termination();
+        reloaded.save(dir.path()).unwrap();
+
+        // Codex cannot answer the resume prompt, so `railguard resume` is the
+        // only way out — it must leave nothing behind that re-blocks the session.
+        let after = SessionState::load(dir.path(), "stuck");
+        assert!(!after.terminated);
+        assert!(after.termination_reason.is_none());
+        assert!(after.pending_approval.is_none());
+        assert!(after.block_history.is_empty());
+        assert_eq!(after.warning_count, 0);
+        assert_eq!(after.suspicion_level, 0);
     }
 
     #[test]

@@ -77,13 +77,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
             .unwrap_or_else(|| "evasion detection".to_string());
         if state.is_approved("session-resume") {
             // User already approved resuming — clear terminated state
-            state.terminated = false;
-            state.termination_reason = None;
-            state.termination_timestamp = None;
-            state.suspicion_level = 0;
-            state.warning_count = 0;
-            state.block_history.clear();
-            state.heightened_keywords.clear();
+            state.clear_termination();
             let _ = state.save(&state_dir);
             // Fall through to normal evaluation
         } else {
