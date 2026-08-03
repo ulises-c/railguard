@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::block::evasion;
-use crate::fence::path::{check_path, extract_file_paths, PathCheck};
+use crate::fence::path::{check_path_from, extract_file_paths, PathCheck};
 use crate::memory::guard as memory_guard;
 use crate::policy::engine::evaluate;
 use crate::snapshot::capture::capture_snapshot;
@@ -392,7 +392,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
         if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
             let paths = evasion::extract_paths_from_command(cmd);
             for path in &paths {
-                match check_path(&policy.fence, path, &fence_root) {
+                match check_path_from(&policy.fence, path, &fence_root, &input.cwd) {
                     PathCheck::Allow => {}
                     PathCheck::Denied(reason) => {
                         let keywords = extract_keywords(cmd);
@@ -445,7 +445,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
         }
     } else {
         for file_path in &file_paths {
-            match check_path(&policy.fence, file_path, &fence_root) {
+            match check_path_from(&policy.fence, file_path, &fence_root, &input.cwd) {
                 PathCheck::Allow => {}
                 PathCheck::Denied(reason) => {
                     let _ = state.save(&state_dir);

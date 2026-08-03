@@ -25,6 +25,22 @@ pub enum PathCheck {
 /// - Symlinks pointing to denied locations
 /// - Home directory expansions (~, $HOME)
 pub fn check_path(config: &FenceConfig, file_path: &str, cwd: &str) -> PathCheck {
+    check_path_from(config, file_path, cwd, cwd)
+}
+
+/// Same as [`check_path`], but resolves relative paths against `call_cwd` while
+/// still measuring containment against `project_root`.
+///
+/// The two differ once the agent's shell has cd'd away from the project root.
+/// Resolving `../etc/passwd` against the root instead of the shell's real cwd
+/// yields a different file than the command actually touches, which can miss an
+/// explicitly denied path entirely.
+pub fn check_path_from(
+    config: &FenceConfig,
+    file_path: &str,
+    project_root: &str,
+    call_cwd: &str,
+) -> PathCheck {
     if !config.enabled {
         return PathCheck::Allow;
     }
@@ -34,14 +50,15 @@ pub fn check_path(config: &FenceConfig, file_path: &str, cwd: &str) -> PathCheck
         return PathCheck::Allow;
     }
 
+    let cwd = project_root;
     let expanded = expand_path(file_path);
     let resolved = if Path::new(&expanded).is_absolute() {
         expanded
     } else {
-        Path::new(cwd).join(expanded).display().to_string()
+        Path::new(call_cwd).join(expanded).display().to_string()
     };
     let canonical = canonicalize_best_effort(&resolved);
-    let cwd_canonical = canonicalize_best_effort(cwd);
+    let cwd_canonical = canonicalize_best_effort(project_root);
 
     // Check explicit denied paths first (canonicalize each)
     for denied in &config.denied_paths {
@@ -277,6 +294,36 @@ mod tests {
             check_path(&config, "src/main.rs", "/project"),
             PathCheck::Allow
         );
+    }
+
+    #[test]
+    fn test_relative_path_resolves_against_the_calling_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let elsewhere = root.path().join("elsewhere");
+        let secrets = elsewhere.join("secrets");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&secrets).unwrap();
+
+        let config = FenceConfig {
+            enabled: true,
+            allowed_paths: vec![],
+            denied_paths: vec![secrets.display().to_string()],
+            allow_local_overrides: false,
+        };
+
+        // The shell has cd'd out of the project. `secrets/key` names the denied
+        // file relative to that cwd; resolving it against the project root
+        // instead would point at a different file and miss the deny entirely.
+        assert!(matches!(
+            check_path_from(
+                &config,
+                "secrets/key",
+                &project.display().to_string(),
+                &elsewhere.display().to_string(),
+            ),
+            PathCheck::Denied(_)
+        ));
     }
 
     #[test]
