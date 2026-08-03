@@ -76,16 +76,31 @@ pub fn rollback_steps(
 ) -> Result<Vec<String>, String> {
     let manifest = read_manifest(snapshot_dir, session_id)?;
 
-    if steps > manifest.len() {
+    // A step is one tool call, not one file. A single apply_patch snapshots
+    // every file it touches under one tool_use_id, so counting entries would
+    // undo a rename only halfway — deleting the destination without restoring
+    // the source.
+    let mut calls: Vec<&str> = Vec::new();
+    for entry in &manifest {
+        if !calls.contains(&entry.tool_use_id.as_str()) {
+            calls.push(&entry.tool_use_id);
+        }
+    }
+
+    if steps > calls.len() {
         return Err(format!(
             "Only {} snapshots available, cannot step back {}",
-            manifest.len(),
+            calls.len(),
             steps
         ));
     }
 
-    // Take the last N entries, rollback each to its pre-edit state
-    let to_rollback: Vec<&SnapshotEntry> = manifest.iter().rev().take(steps).collect();
+    let selected: Vec<&str> = calls.iter().rev().take(steps).copied().collect();
+    let to_rollback: Vec<&SnapshotEntry> = manifest
+        .iter()
+        .rev()
+        .filter(|entry| selected.contains(&entry.tool_use_id.as_str()))
+        .collect();
     let mut restored = vec![];
 
     for entry in to_rollback {
@@ -235,6 +250,29 @@ mod tests {
         // Step back 1 → should restore v3
         rollback_steps(snap_dir.path(), "s1", 1).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "v3");
+    }
+
+    #[test]
+    fn test_rollback_one_step_undoes_a_whole_multi_file_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap_dir = tempfile::tempdir().unwrap();
+
+        let old_path = dir.path().join("old.txt");
+        let new_path = dir.path().join("new.txt");
+        fs::write(&old_path, "original").unwrap();
+
+        // One apply_patch renaming old.txt → new.txt: both files are snapshotted
+        // under a single tool_use_id.
+        capture_snapshot(snap_dir.path(), "s1", "patch-1", old_path.to_str().unwrap()).unwrap();
+        capture_snapshot(snap_dir.path(), "s1", "patch-1", new_path.to_str().unwrap()).unwrap();
+        fs::remove_file(&old_path).unwrap();
+        fs::write(&new_path, "renamed").unwrap();
+
+        // One step is one tool call, so it must undo the entire rename.
+        rollback_steps(snap_dir.path(), "s1", 1).unwrap();
+
+        assert_eq!(fs::read_to_string(&old_path).unwrap(), "original");
+        assert!(!new_path.exists(), "destination should have been removed");
     }
 
     #[test]
