@@ -92,6 +92,12 @@ impl HookOutput {
     }
 
     pub fn deny(reason: &str) -> Self {
+        // Codex rejects a `deny` carrying an empty reason and then runs the tool
+        // anyway, so an empty reason must never reach the wire.
+        let reason = match reason.trim() {
+            "" => "Blocked by Railguard policy.",
+            trimmed => trimmed,
+        };
         HookOutput {
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: "PreToolUse".to_string(),
