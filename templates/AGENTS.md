@@ -27,7 +27,7 @@ The Bash fence matches fenced path **strings** in the command, so a command that
 
 ## Self-protection
 
-Hard-blocked, and attempting them counts against you: `railguard uninstall`, editing `.claude/settings.json` or `.codex/hooks.json`, removing the railguard binary. Editing `railguard.yaml` requires human approval — Claude Code uses **ask**, while Codex denies the guarded edit until the human applies the proposal outside Codex. You *can* still help tune policy: read it, propose the exact edit, or suggest `railguard configure`. Changes take effect immediately, no restart needed.
+Hard-blocked, and attempting them counts against you: `railguard uninstall`, editing `.claude/settings.json` or anything under `~/.codex` (hook trust and the `hooks` feature flag live in `config.toml`, so the whole directory is fenced), launching a nested agent with hooks disabled, removing the railguard binary. Editing `railguard.yaml` requires human approval — Claude Code uses **ask**, while Codex denies the guarded edit until the human applies the proposal outside Codex. You *can* still help tune policy: read it, propose the exact edit, or suggest `railguard configure`. Changes take effect immediately, no restart needed.
 
 ## Widening file access for one project
 

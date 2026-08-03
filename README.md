@@ -39,6 +39,8 @@ Codex, review the new hook definitions with `/hooks` before using them.
 Codex does not currently support interactive `ask` decisions from PreToolUse
 hooks. Railguard therefore fails closed: approval-gated calls are denied with
 an actionable explanation instead of producing a hook error and continuing.
+Because Codex also can't answer the resume prompt, a terminated session is
+revived from the terminal with `railguard resume`.
 
 ---
 

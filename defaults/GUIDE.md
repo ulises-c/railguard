@@ -15,6 +15,9 @@ carries only the core rules; this guide is printed on demand by
   will be prompted to approve or deny in Claude Code. Codex does not support
   hook-driven approval prompts, so Railguard returns a denial with instructions
   to update the policy or allowlist first. Wait; don't route around either result.
+- **A terminated session can be revived by the human** with
+  `railguard resume [--session <id>]`. This is the only recovery path under
+  Codex, which cannot answer the resume prompt. You cannot run it yourself.
 - **File writes are snapshotted.** Every Write/Edit/apply_patch is backed up before
   execution. The human can rollback any change.
 - **Everything is logged.** All tool calls and decisions are recorded in
@@ -95,7 +98,10 @@ Changes take effect on the next tool call. Details:
 ## Do NOT attempt to
 
 - Run `railguard uninstall` - it will be blocked.
-- Modify `~/.claude/settings.json` or `~/.codex/hooks.json` - it will be blocked.
+- Modify `~/.claude/settings.json` or anything under `~/.codex` - it will be
+  blocked. Codex keeps hook trust state and the `hooks` feature flag in
+  `~/.codex/config.toml`, so the whole directory is fenced, not just
+  `hooks.json`. Launching a nested agent with hooks disabled is blocked too.
 - Remove the railguard binary - it will be blocked.
 - Access `~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc`, or other fenced paths (if
   path fencing is enabled).

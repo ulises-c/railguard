@@ -2,10 +2,10 @@
 name = "railguard"
 version = "0.5.1"
 edition = "2021"
-description = "A secure runtime for Claude Code and Codex."
+description = "A secure runtime for Claude Code and Codex. The safer alternative to --dangerously-skip-permissions."
 license = "MIT"
 repository = "https://github.com/ulises-c/railguard"
-keywords = ["ai", "agents", "safety", "runtime", "codex"]
+keywords = ["ai", "agents", "safety", "claude", "codex"]
 
 [lib]
 name = "railguard"

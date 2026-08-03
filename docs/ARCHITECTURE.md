@@ -25,7 +25,7 @@ Each hook invocation is a **separate OS process**. The client spawns `railguard 
    - `"deny"` -- Tool call is blocked. The `permissionDecisionReason` is shown to the agent.
    - `"ask"` -- Claude Code prompts the human for approval. Codex does not support this value, so Railguard converts approval-required outcomes to actionable denials.
 
-All hook commands have a 5-second timeout configured in the settings registration.
+All hook commands have a 60-second timeout configured in the settings registration. A hook that times out is treated as a failed run and does *not* block the tool call, so the budget covers the worst case (a patch touching many files) rather than the typical one. The binary path is shell-quoted, since a hook that fails to spawn also fails open.
 
 ### Process Isolation
 
@@ -282,7 +282,7 @@ For files that did not exist before (`existed: false`), rollback deletes the fil
 1. **TTY check** -- `stdin.is_terminal() && stdout.is_terminal()` must be true. Agents pipe stdin, so this rejects automated uninstall attempts.
 2. **Native OS dialog** -- macOS uses `osascript` (AppleScript dialog), Linux tries `zenity` then `kdialog`, Windows uses PowerShell `MessageBox`. An AI agent cannot click a GUI button.
 3. **Terminal fallback** -- If no GUI is available, requires typing "remove" at a prompt.
-4. **Self-protection rules** -- The blocklist blocks `railguard uninstall`, Claude/Codex hook-setting modification, and railguard binary removal, so the agent cannot even reach the uninstall code path.
+4. **Self-protection rules** -- The blocklist blocks `railguard uninstall`, Claude/Codex hook-setting modification, disabling Codex's `hooks` feature flag or hook trust, and railguard binary removal, so the agent cannot even reach the uninstall code path. The fence denies all of `~/.codex`, not just `hooks.json`: Codex stores hook trust state and the `hooks` feature flag in `~/.codex/config.toml`, so protecting only `hooks.json` would leave a way to neutralize the hooks while the integrity check still reported them present.
 
 ### `configure/` -- Interactive Terminal UI
 
