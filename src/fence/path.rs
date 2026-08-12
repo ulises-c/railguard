@@ -279,11 +279,27 @@ fn harvest_paths(value: &serde_json::Value, under_path_key: bool, out: &mut Vec<
     }
 }
 
-/// Only rooted paths count. A bare `notes.txt` cannot escape the project once
-/// resolved against cwd, so the fence has nothing to say about it.
+/// Values worth handing to the fence: anything rooted (`/`, `~`, `$HOME`) plus
+/// any relative path with a `..` component, since those escape the project once
+/// resolved against the calling cwd. A bare `notes.txt` or `src/main.rs` cannot
+/// escape, so the fence has nothing to say about it and skipping those keeps
+/// ordinary string arguments from producing prompts.
 fn looks_like_path(value: &str) -> bool {
     let value = value.trim();
-    value.starts_with('/') || value.starts_with("~/") || value == "~" || value.starts_with("$HOME")
+    let rooted = value.starts_with('/')
+        || value.starts_with("~/")
+        || value == "~"
+        || value.starts_with("$HOME");
+    rooted || escapes_upward(value)
+}
+
+/// True when the value has a `..` path component (`../x`, `a/../../x`, and the
+/// Windows-style `..\x`), rather than merely containing the two characters —
+/// `file..name` is not a traversal.
+fn escapes_upward(value: &str) -> bool {
+    value
+        .split(['/', '\\'])
+        .any(|component| component.trim() == "..")
 }
 
 fn extract_paths_from_patch(patch: &str) -> Vec<String> {
@@ -564,6 +580,24 @@ mod tests {
     fn unknown_tool_non_path_strings_do_not_become_paths() {
         let input = serde_json::json!({"query": "SELECT 1", "limit": 10});
         assert!(extract_file_paths("mcp__db__query", &input).is_empty());
+    }
+
+    #[test]
+    fn mcp_tool_relative_traversal_reaches_the_fence() {
+        // Rooted-only detection left the obvious escape open: `../` resolves
+        // against the calling cwd and lands wherever it likes.
+        let input = serde_json::json!({"path": "../../.ssh/authorized_keys"});
+        assert_eq!(
+            extract_file_paths("mcp__fs__write", &input),
+            vec!["../../.ssh/authorized_keys"]
+        );
+    }
+
+    #[test]
+    fn unknown_tool_in_project_relative_paths_stay_quiet() {
+        // These cannot escape the project, so they must not add fence prompts.
+        let input = serde_json::json!({"path": "src/main.rs", "file": "notes..txt"});
+        assert!(extract_file_paths("mcp__fs__write", &input).is_empty());
     }
 
     #[test]
