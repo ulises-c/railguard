@@ -624,6 +624,16 @@ fn cmd_status() -> i32 {
                     "off"
                 }
             );
+            // Built-in denies are unioned in, so the only way to lose one is to
+            // ask. Surface that: it is the difference between a hard block and
+            // an approvable prompt on somewhere like ~/.ssh.
+            if !loaded_policy.fence.denied_paths_remove.is_empty() {
+                println!(
+                    "       {} built-in denies removed by policy: {}",
+                    "!".red().bold(),
+                    loaded_policy.fence.denied_paths_remove.join(", ")
+                );
+            }
             println!(
                 "       trace: {}",
                 if loaded_policy.trace.enabled {

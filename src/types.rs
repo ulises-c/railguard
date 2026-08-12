@@ -199,8 +199,17 @@ pub struct FenceConfig {
     pub enabled: bool,
     #[serde(default)]
     pub allowed_paths: Vec<String>,
+    /// Additive: entries here are unioned with the built-in denies rather than
+    /// replacing them. Listing one custom path must never silently drop
+    /// `~/.ssh` — or `~/.claude` / `~/.codex`, which are Railguard's own
+    /// self-protection. Use `denied_paths_remove` to drop a built-in on purpose.
     #[serde(default)]
     pub denied_paths: Vec<String>,
+    /// Built-in denies to opt out of, by exact string. Deliberately explicit and
+    /// noisy: `railguard status` reports every entry, because giving the agent
+    /// write access to one of these is a decision that should stay visible.
+    #[serde(default)]
+    pub denied_paths_remove: Vec<String>,
     /// When true, a project-local `.railguard.local.yaml` may *add* to
     /// `allowed_paths` (never remove denies). Off by default: the override file
     /// is controlled by the repository being guarded, so honoring it by default
@@ -243,6 +252,7 @@ impl Default for FenceConfig {
                 "~/.config/systemd/user".to_string(),
                 "~/.config/autostart".to_string(),
             ],
+            denied_paths_remove: vec![],
             allow_local_overrides: false,
         }
     }

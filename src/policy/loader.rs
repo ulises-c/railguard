@@ -127,10 +127,33 @@ fn apply_local_overrides(policy: &mut Policy, cwd: &Path) {
     }
 }
 
+/// Union the built-in `denied_paths` into a user policy.
+///
+/// Serde gives an absent-but-present-parent field its type default — an empty
+/// vec — so any policy that named even one custom deny silently dropped every
+/// built-in one. `~/.ssh` degraded from an unappealable deny to an approvable
+/// prompt, and `~/.claude` / `~/.codex` (Railguard's own hooks) with it. Nobody
+/// who ran `railguard init` before a default was added would ever receive it.
+///
+/// Opting out stays possible, but only by naming the entry in
+/// `denied_paths_remove`, which `railguard status` then reports.
+fn merge_fence_defaults(fence: &mut crate::types::FenceConfig) {
+    for builtin in crate::types::FenceConfig::default().denied_paths {
+        if !fence.denied_paths.contains(&builtin) {
+            fence.denied_paths.push(builtin);
+        }
+    }
+    if !fence.denied_paths_remove.is_empty() {
+        let removals = fence.denied_paths_remove.clone();
+        fence.denied_paths.retain(|p| !removals.contains(p));
+    }
+}
+
 /// Merge user policy with built-in defaults.
 /// Built-in rules are always prepended — users can override with allowlist.
 /// Rules are split by action: "block" → blocklist, "approve" → approve list.
 fn merge_with_defaults(mut policy: Policy) -> Policy {
+    merge_fence_defaults(&mut policy.fence);
     let defaults = crate::policy::defaults::default_blocklist();
 
     let user_rule_names: std::collections::HashSet<String> = policy
@@ -339,6 +362,47 @@ blocklist:
         .unwrap();
 
         let policy = load_policy_or_defaults(dir.path());
+        assert!(policy.fence.denied_paths.iter().any(|p| p == "~/.ssh"));
+    }
+
+    /// Naming one custom deny used to discard every built-in one, silently
+    /// downgrading `~/.ssh` from a hard block to an approvable prompt.
+    #[test]
+    fn user_denied_paths_are_added_to_the_builtins_not_swapped_for_them() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("railguard.yaml"),
+            "version: 1\nfence:\n  enabled: true\n  denied_paths:\n    - \"~/.mycustom\"\n",
+        )
+        .unwrap();
+
+        let policy = load_policy_or_defaults(dir.path());
+        assert!(policy.fence.denied_paths.iter().any(|p| p == "~/.mycustom"));
+        for builtin in ["~/.ssh", "~/.aws", "~/.claude", "~/.codex", "/etc"] {
+            assert!(
+                policy.fence.denied_paths.iter().any(|p| p == builtin),
+                "built-in deny {} must survive a user-supplied denied_paths",
+                builtin
+            );
+        }
+    }
+
+    /// Opting out stays possible, but only by asking for it by name.
+    #[test]
+    fn denied_paths_remove_drops_only_what_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("railguard.yaml"),
+            "version: 1\nfence:\n  enabled: true\n  denied_paths_remove:\n    - \"~/.gitconfig\"\n",
+        )
+        .unwrap();
+
+        let policy = load_policy_or_defaults(dir.path());
+        assert!(!policy
+            .fence
+            .denied_paths
+            .iter()
+            .any(|p| p == "~/.gitconfig"));
         assert!(policy.fence.denied_paths.iter().any(|p| p == "~/.ssh"));
     }
 

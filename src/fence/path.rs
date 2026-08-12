@@ -510,6 +510,7 @@ mod tests {
                 "/etc".to_string(),
             ],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         }
     }
 
@@ -565,6 +566,7 @@ mod tests {
             allowed_paths: vec![],
             denied_paths: vec![secrets.display().to_string()],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         };
 
         // The shell has cd'd out of the project. `secrets/key` names the denied
@@ -588,6 +590,7 @@ mod tests {
             allowed_paths: vec![],
             denied_paths: vec!["/etc".to_string()],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         };
         assert_eq!(
             check_path(&config, "/etc/passwd", "/project"),
@@ -602,6 +605,7 @@ mod tests {
             allowed_paths: vec![],
             denied_paths: vec![],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         };
         assert!(matches!(
             check_path(&config, "/other/file.txt", "/project"),
@@ -616,6 +620,7 @@ mod tests {
             allowed_paths: vec!["/project".to_string(), "/tmp".to_string()],
             denied_paths: vec![],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         };
         assert_eq!(
             check_path(&config, "/project/src/main.rs", "/project"),
@@ -639,6 +644,7 @@ mod tests {
             allowed_paths: vec!["/tmp".to_string()],
             denied_paths: vec![],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         };
         assert_eq!(
             check_path(&config, "/project/src/main.rs", "/project"),
@@ -663,6 +669,7 @@ mod tests {
             allowed_paths: vec!["/home/u/github".to_string()],
             denied_paths: vec![],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         };
         assert_eq!(
             check_path(&config, "/home/u/github/railguard/src/main.rs", "/project"),
