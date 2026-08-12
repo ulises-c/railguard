@@ -274,7 +274,17 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
 
     // Evaluate hard policy blocks before the path fence. An outside-project
     // prompt must never downgrade a command that policy says is forbidden.
-    let decision = evaluate(policy, tool_name, &tool_input);
+    let mut decision = evaluate(policy, tool_name, &tool_input);
+    if tool_name == "Bash" {
+        if let Decision::Block { rule, .. } = &decision {
+            // The built-in settings tamper rule exists to stop writes to
+            // Claude Code settings; a provably read-only command may inspect
+            // them. The path fence still applies afterwards.
+            if rule == "railguard-tamper-settings" && is_read_only_settings_access(&command) {
+                decision = Decision::Allow;
+            }
+        }
+    }
     if let Decision::Block { rule, message } = &decision {
         if tool_name == "Bash" && !command.is_empty() {
             let keywords = extract_keywords(&command);
@@ -848,6 +858,14 @@ fn has_write_mode(tool: &str, segment: &str) -> bool {
         "xxd" => args.iter().any(|arg| matches!(*arg, "-r" | "-revert")),
         _ => false,
     }
+}
+
+/// Read-only access to Claude Code settings is exempt from the tamper rule.
+/// Substitutions are rejected on top of the read-only check because they can
+/// smuggle a write through an otherwise read-only command line, e.g.
+/// `cat "$(cp evil.json ~/.claude/settings.json)"`.
+fn is_read_only_settings_access(cmd: &str) -> bool {
+    !cmd.contains("$(") && !cmd.contains('`') && !cmd.contains("<(") && is_read_only_command(cmd)
 }
 
 /// A non-force worktree removal is guarded by Git itself: Git refuses to

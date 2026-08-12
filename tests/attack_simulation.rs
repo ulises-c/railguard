@@ -674,6 +674,50 @@ fn self_protect_block_settings_via_bash() {
     );
 }
 
+// Fence-allow ~/.claude so these tests exercise the tamper rule itself, not
+// the default denied path.
+const SETTINGS_READ_POLICY: &str = "version: 1\nblocklist: []\nfence:\n  enabled: true\n  allowed_paths:\n    - ~/.claude\n  denied_paths: []\n";
+
+#[test]
+fn self_protect_allows_readonly_settings_access() {
+    let dir = create_policy_dir(SETTINGS_READ_POLICY);
+    for command in [
+        "grep -n hooks ~/.claude/settings.json",
+        "cat ~/.claude/settings.json",
+        "jq .env ~/.claude/settings.json",
+        "diff ~/.claude/settings.json /tmp/settings.json",
+        "cat ~/.claude/settings.json | grep model",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            !output_contains_deny(&stdout),
+            "`{command}` is read-only and should not be denied: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn self_protect_still_blocks_settings_writes() {
+    let dir = create_policy_dir(SETTINGS_READ_POLICY);
+    for command in [
+        "sed -i 's/a/b/' ~/.claude/settings.json",
+        "tee ~/.claude/settings.json < /tmp/evil.json",
+        "cp /tmp/evil.json ~/.claude/settings.json",
+        "python3 -c \"open('/home/u/.claude/settings.json','w')\"",
+        "cat /tmp/evil.json > ~/.claude/settings.json",
+        "cat \"$(cp /tmp/evil.json ~/.claude/settings.json)\"",
+        "grep hooks ~/.claude/settings.json && rm -f ~/.claude/settings.json",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_contains_deny(&stdout),
+            "`{command}` can write settings.json and must stay blocked: {stdout}"
+        );
+    }
+}
+
 #[test]
 fn self_protect_block_remove_binary() {
     let dir = create_policy_dir("version: 1\nblocklist: []");
