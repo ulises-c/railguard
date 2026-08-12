@@ -104,20 +104,17 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
         }
     }
 
-    // Extract command for Bash tools
-    let command = if tool_name == "Bash" {
-        tool_input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    } else {
-        String::new()
-    };
+    // The shell command this call will run. `Bash` names it directly; a
+    // shell-capable MCP tool carries one under its own argument name. Both must
+    // reach the fence, the blocklist, and the threat classifier — gating those
+    // on the literal name "Bash" left `mcp__*__execute_command` ungoverned.
+    let command =
+        crate::fence::path::extract_shell_command(tool_name, &tool_input).unwrap_or_default();
+    let runs_shell_command = !command.is_empty();
 
     // === THREAT DETECTION (before policy evaluation) ===
 
-    if tool_name == "Bash" && !command.is_empty() {
+    if runs_shell_command {
         // Tier 3: Behavioral evasion (check BEFORE new blocks)
         if let Some(tier) = check_behavioral_evasion(&state, &command) {
             let pattern_key = match &tier {
@@ -288,15 +285,12 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
     // === MEMORY GUARD (before path fence, since ~/.claude is denied) ===
 
     if policy.memory.enabled {
-        // For Bash commands, check if they touch memory paths
-        let memory_file_path = if tool_name == "Bash" {
-            tool_input
-                .get("command")
-                .and_then(|v| v.as_str())
-                .and_then(|cmd| {
-                    let paths = evasion::extract_paths_from_command(cmd);
-                    paths.into_iter().find(|p| memory_guard::is_memory_path(p))
-                })
+        // For shell commands, check if they touch memory paths
+        let memory_file_path = if runs_shell_command {
+            Some(command.as_str()).and_then(|cmd| {
+                let paths = evasion::extract_paths_from_command(cmd);
+                paths.into_iter().find(|p| memory_guard::is_memory_path(p))
+            })
         } else {
             file_paths
                 .iter()
@@ -382,8 +376,9 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
 
     // === PATH FENCE ===
 
-    if tool_name == "Bash" {
-        if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
+    if runs_shell_command {
+        {
+            let cmd = command.as_str();
             let paths = evasion::extract_paths_from_command(cmd);
             for path in &paths {
                 match check_path_from(&policy.fence, path, &fence_root, &input.cwd) {
@@ -437,7 +432,12 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                 }
             }
         }
-    } else {
+    }
+
+    // Not an `else`: a tool can carry both a shell command and path arguments,
+    // and both deserve the fence. Bash is excluded because its paths were
+    // already checked above, from the command itself.
+    if tool_name != "Bash" {
         for file_path in &file_paths {
             match check_path_from(&policy.fence, file_path, &fence_root, &input.cwd) {
                 PathCheck::Allow => {}
@@ -488,7 +488,20 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
 
     // === POLICY EVALUATION (allowlist → blocklist → approve) ===
 
-    let decision = evaluate(policy, tool_name, &tool_input);
+    let mut decision = evaluate(policy, tool_name, &tool_input);
+
+    // Every built-in rule is scoped to `tool: "Bash"`, so a shell command
+    // arriving under some other tool name matched nothing. Re-evaluate the
+    // extracted command as if it were Bash and keep the stricter of the two —
+    // `railguard uninstall` must not become allowed by being wrapped in an MCP
+    // tool call. Only escalates: a rule that already blocked still blocks.
+    if runs_shell_command && tool_name != "Bash" && matches!(decision, Decision::Allow) {
+        decision = evaluate(
+            policy,
+            "Bash",
+            &serde_json::json!({ "command": command.clone() }),
+        );
+    }
 
     match &decision {
         Decision::Allow => {

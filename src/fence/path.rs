@@ -269,7 +269,7 @@ const CONTENT_KEY_TOKENS: &[&str] = &[
 ];
 
 /// Split a key into lowercase tokens across `_`, `-`, `.`, and camelCase humps.
-fn key_tokens(key: &str) -> Vec<String> {
+pub(crate) fn key_tokens(key: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut prev_lower = false;
@@ -371,6 +371,85 @@ fn escapes_upward(value: &str) -> bool {
     value
         .split(['/', '\\'])
         .any(|component| component.trim() == "..")
+}
+
+/// Keys whose values are a shell command line rather than data.
+const SHELL_COMMAND_KEY_TOKENS: &[&str] = &[
+    "command", "commands", "cmd", "cmdline", "script", "shell", "argv",
+];
+
+/// The shell command a tool call will execute, if any.
+///
+/// `Bash` names it directly. Everything else is the reason this exists: a
+/// shell-capable MCP server (`mcp__*__execute_command` and friends) runs
+/// commands through PreToolUse like any other tool, but every built-in rule is
+/// scoped to `tool: "Bash"` and the threat classifier is gated on the same name,
+/// so those calls reached no fence, no blocklist, and no evasion detection.
+///
+/// Returns the joined command text so callers can run it through the Bash path.
+/// Tools whose payload merely *looks* like a command are handled by their own
+/// extractor and deliberately excluded: `apply_patch` keys its patch body under
+/// `command`, and feeding a patch to the shell matcher would be nonsense.
+pub fn extract_shell_command(tool_name: &str, tool_input: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "Bash" => tool_input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        "Write" | "Edit" | "Read" | "apply_patch" => None,
+        _ => {
+            let mut found = Vec::new();
+            harvest_commands(tool_input, false, &mut found);
+            if found.is_empty() {
+                None
+            } else {
+                // Multiple command-bearing arguments are checked as one blob:
+                // every rule that matches any of them should still fire.
+                Some(found.join("\n"))
+            }
+        }
+    }
+}
+
+fn is_shell_command_key(key: &str) -> bool {
+    key_tokens(key)
+        .iter()
+        .any(|t| SHELL_COMMAND_KEY_TOKENS.contains(&t.as_str()))
+}
+
+fn harvest_commands(value: &serde_json::Value, under_command_key: bool, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) if under_command_key && !s.trim().is_empty() => {
+            out.push(s.clone());
+        }
+        // An argv array is one command split across elements (`["sh","-c","..."]`),
+        // so join rather than treating each word as its own command.
+        serde_json::Value::Array(items) if under_command_key => {
+            let joined: Vec<String> = items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect();
+            if !joined.is_empty() {
+                out.push(joined.join(" "));
+            }
+            for item in items {
+                if !item.is_string() {
+                    harvest_commands(item, under_command_key, out);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                harvest_commands(item, false, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, val) in map {
+                harvest_commands(val, is_shell_command_key(key), out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn extract_paths_from_patch(patch: &str) -> Vec<String> {
