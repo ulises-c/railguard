@@ -150,6 +150,14 @@ fn is_dev_path(path: &str) -> bool {
 
 /// Expand ~ to home directory and resolve relative paths.
 fn expand_path(path: &str) -> String {
+    // Trim first: `Path::is_absolute` is false for " /home/x", which would make
+    // the caller resolve an absolute path as project-relative and let it through.
+    // Strip a file:// scheme for the same reason — some MCP servers pass URIs.
+    let path = path.trim();
+    let path = path
+        .strip_prefix("file://localhost")
+        .or_else(|| path.strip_prefix("file://"))
+        .unwrap_or(path);
     if path.starts_with("~/") || path == "~" {
         if let Some(home) = dirs::home_dir() {
             return format!("{}{}", home.display(), &path[1..]);
@@ -201,47 +209,101 @@ pub fn extract_file_paths(tool_name: &str, tool_input: &serde_json::Value) -> Ve
     }
 }
 
-/// Keys whose string values name a filesystem path across common MCP and local
-/// function tools. Matched case-insensitively against the whole key, plus a
-/// suffix match so `source_path` / `dest_file` are caught without enumerating
-/// every vendor's spelling.
-const PATH_KEYS: &[&str] = &[
+/// Nouns that mark an argument as naming a filesystem location. Matched against
+/// individual key *tokens* rather than whole key spellings, so `sourcePath`,
+/// `source_path`, `source-path`, and `SourcePaths` are all equivalent — a list
+/// of full spellings is a list of the ones someone thought of, and the ones they
+/// missed are the bypass.
+const PATH_KEY_TOKENS: &[&str] = &[
     "path",
+    "paths",
     "file",
-    "file_path",
-    "filepath",
+    "files",
     "filename",
-    "file_name",
+    "filenames",
     "dir",
+    "dirs",
     "directory",
+    "directories",
     "folder",
+    "folders",
     "target",
-    "target_file",
+    "targets",
     "destination",
+    "destinations",
     "dest",
     "source",
+    "sources",
     "src",
     "output",
-    "output_path",
-    "input_path",
-    "notebook_path",
-    "edit_file_path",
-    // Plurals: MCP servers that accept batches name them this way.
-    "paths",
-    "files",
-    "file_paths",
-    "filenames",
-    "directories",
-    "targets",
-    "sources",
+    "outputs",
+    "input",
+    "inputs",
+    "location",
+    "locations",
+    "uri",
+    "url",
+    "notebook",
+    "root",
+    "cwd",
 ];
 
+/// Keys whose values are file *contents* rather than locations. Without this,
+/// a C file starting with a block comment or any argument holding a leading
+/// slash would be fenced as if it were a path.
+const CONTENT_KEY_TOKENS: &[&str] = &[
+    "content",
+    "contents",
+    "text",
+    "body",
+    "data",
+    "oldtext",
+    "newtext",
+    "old",
+    "new",
+    "patch",
+    "diff",
+    "message",
+    "description",
+    "query",
+];
+
+/// Split a key into lowercase tokens across `_`, `-`, `.`, and camelCase humps.
+fn key_tokens(key: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut prev_lower = false;
+    for ch in key.chars() {
+        if ch == '_' || ch == '-' || ch == '.' || ch == ' ' {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && prev_lower && !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+        prev_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        current.push(ch.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
 fn is_path_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    PATH_KEYS.contains(&key.as_str())
-        || PATH_KEYS
-            .iter()
-            .any(|candidate| key.ends_with(&format!("_{}", candidate)))
+    let tokens = key_tokens(key);
+    // A content key wins even when it also carries a path noun, so `patch_text`
+    // and `new_file_content` stay out of the fence.
+    if tokens
+        .iter()
+        .any(|t| CONTENT_KEY_TOKENS.contains(&t.as_str()))
+    {
+        return false;
+    }
+    tokens.iter().any(|t| PATH_KEY_TOKENS.contains(&t.as_str()))
 }
 
 /// Best-effort path harvest from an arbitrary tool input. Walks the whole JSON
@@ -258,6 +320,11 @@ fn extract_paths_from_unknown_tool(tool_input: &serde_json::Value) -> Vec<String
     found
 }
 
+/// `under_path_key` marks a value reached *directly* from a path-named key —
+/// through arrays, which inherit their key, but never through a nested object.
+/// Letting it stick to every descendant meant `{"files":[{"path":…,
+/// "content":"/* header */"}]}` fenced the file's contents as a path; on Codex
+/// that is an unappealable denial of an ordinary batch write.
 fn harvest_paths(value: &serde_json::Value, under_path_key: bool, out: &mut Vec<String>) {
     match value {
         serde_json::Value::String(s)
@@ -272,7 +339,7 @@ fn harvest_paths(value: &serde_json::Value, under_path_key: bool, out: &mut Vec<
         }
         serde_json::Value::Object(map) => {
             for (key, val) in map {
-                harvest_paths(val, under_path_key || is_path_key(key), out);
+                harvest_paths(val, is_path_key(key), out);
             }
         }
         _ => {}
@@ -286,6 +353,10 @@ fn harvest_paths(value: &serde_json::Value, under_path_key: bool, out: &mut Vec<
 /// ordinary string arguments from producing prompts.
 fn looks_like_path(value: &str) -> bool {
     let value = value.trim();
+    let value = value
+        .strip_prefix("file://localhost")
+        .or_else(|| value.strip_prefix("file://"))
+        .unwrap_or(value);
     let rooted = value.starts_with('/')
         || value.starts_with("~/")
         || value == "~"
@@ -591,6 +662,53 @@ mod tests {
             extract_file_paths("mcp__fs__write", &input),
             vec!["../../.ssh/authorized_keys"]
         );
+    }
+
+    #[test]
+    fn mcp_path_keys_match_regardless_of_spelling() {
+        // A list of full key spellings is a list of the ones someone thought of;
+        // camelCase compounds used to sail straight past the fence.
+        for key in [
+            "sourcePath",
+            "targetFile",
+            "outputPath",
+            "destinationPath",
+            "source_path",
+            "target-file",
+            "NotebookPath",
+        ] {
+            let input = serde_json::json!({ key: "/home/u/.ssh/authorized_keys" });
+            assert_eq!(
+                extract_file_paths("mcp__fs__write", &input),
+                vec!["/home/u/.ssh/authorized_keys"],
+                "key {} should be treated as a path",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_file_contents_are_not_treated_as_paths() {
+        // A C file opening with a block comment, nested under a path-named key.
+        let input = serde_json::json!({
+            "files": [{"path": "src/a.c", "content": "/* header */"}]
+        });
+        assert!(extract_file_paths("mcp__fs__batch_write", &input).is_empty());
+    }
+
+    #[test]
+    fn mcp_file_uri_and_padded_values_still_reach_the_fence() {
+        for value in [
+            "file:///home/u/.ssh/authorized_keys",
+            " /home/u/.ssh/authorized_keys",
+        ] {
+            let input = serde_json::json!({ "path": value });
+            assert!(
+                !extract_file_paths("mcp__fs__write", &input).is_empty(),
+                "{} should be treated as a path",
+                value
+            );
+        }
     }
 
     #[test]

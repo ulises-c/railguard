@@ -86,9 +86,15 @@ fn find_local_override_file(start_dir: &Path) -> Option<PathBuf> {
 /// Apply a project-local `.railguard.local.yaml`. It may only *add* entries to
 /// `fence.allowed_paths`; it cannot touch `denied_paths` or any other policy.
 /// Honored only when the base policy opted in with `fence.allow_local_overrides:
-/// true`, so a cloned or hostile repo cannot self-grant filesystem access. Even
-/// when honored, denied paths still take precedence in the fence check, so the
-/// override can never expose `~/.ssh`, `/etc`, etc.
+/// true`. Even when honored, denied paths take precedence in the fence check, so
+/// the override can never expose `~/.ssh`, `/etc`, etc.
+///
+/// Note what this does *not* buy: `find_policy_file` resolves a project's own
+/// `railguard.yaml` before the human's global one and `merge_with_defaults`
+/// merges only rules, so a repo shipping a root `railguard.yaml` replaces
+/// `fence` wholesale — a strictly larger hole than the override file. Opting out
+/// here is defense in depth, not a guarantee that a hostile repo cannot widen
+/// its own fence.
 fn apply_local_overrides(policy: &mut Policy, cwd: &Path) {
     if !policy.fence.allow_local_overrides {
         return;
@@ -334,5 +340,33 @@ blocklist:
 
         let policy = load_policy_or_defaults(dir.path());
         assert!(policy.fence.denied_paths.iter().any(|p| p == "~/.ssh"));
+    }
+
+    /// The shipped starter policy is what `railguard init` writes, and
+    /// `find_policy_file` resolves a project's own file before the human's
+    /// global one — so a permissive template lets a project opt itself in no
+    /// matter what the Rust default says. These two drifted apart once already.
+    #[test]
+    fn shipped_template_matches_the_secure_defaults() {
+        let template = include_str!("../../defaults/railguard.yaml");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("railguard.yaml"), template).unwrap();
+        let policy = load_policy_or_defaults(dir.path());
+
+        assert!(
+            !policy.fence.allow_local_overrides,
+            "shipped template must not let a project opt itself into local overrides"
+        );
+        assert!(
+            policy.fence.enabled,
+            "shipped template must keep the fence on"
+        );
+        for required in ["~/.ssh", "~/.aws", "~/.claude", "~/.codex", "/etc"] {
+            assert!(
+                policy.fence.denied_paths.iter().any(|p| p == required),
+                "shipped template is missing denied path {}",
+                required
+            );
+        }
     }
 }

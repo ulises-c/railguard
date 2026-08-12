@@ -68,15 +68,18 @@ allowlist: []
 fence:
   enabled: true
   allowed_paths: []        # Empty = allow project directory only
-  allow_local_overrides: true   # On by default: a project-local
-                                # .railguard.local.yaml may ADD to allowed_paths
-                                # (additive only; denies always win). Set false
-                                # to disable. See docs/per-project-allowlist.md
+  allow_local_overrides: false  # Off by default: .railguard.local.yaml ships
+                                # inside the repository being guarded, so
+                                # honoring it here would let a clone opt itself
+                                # in. Turn on only in a policy you control.
+                                # See docs/per-project-allowlist.md
   denied_paths:
     - "~/.ssh"
     - "~/.aws"
     - "~/.gnupg"
     - "~/.config/gcloud"
+    # Agent config — blocked so the agent cannot disable Railguard's own hooks.
+    - "~/.claude"
     - "~/.codex"
     - "/etc"
     # Shell and login init files: a write here is arbitrary code execution on
