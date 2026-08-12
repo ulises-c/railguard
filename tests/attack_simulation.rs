@@ -1153,6 +1153,54 @@ fn railguard_state_directory_cannot_be_deleted() {
     );
 }
 
+/// `is_path_key` let any content token veto the classification, and `new`,
+/// `old`, and `data` were on that list — so the rename arguments a filesystem
+/// MCP server actually exposes never reached the fence at all.
+#[test]
+fn mcp_rename_new_path_reaches_the_fence() {
+    let dir = create_policy_dir(
+        "version: 1\nblocklist: []\nfence:\n  enabled: true\n  denied_paths:\n    - \"~/.ssh\"",
+    );
+    let home = dirs::home_dir().unwrap();
+    for key in ["new_path", "newPath", "old_path", "data_dir"] {
+        let input = make_mcp_input(
+            &unique_session_id(),
+            dir.path().to_str().unwrap(),
+            "mcp__filesystem__rename",
+            serde_json::json!({
+                key: format!("{}/.ssh/authorized_keys", home.display())
+            }),
+        );
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_contains_deny(&stdout),
+            "`{key}` naming a denied path must be fenced, got: {stdout}"
+        );
+    }
+}
+
+/// The counterweight: a content key that merely *also* carries a path noun must
+/// stay out of the fence, or an ordinary batch edit becomes an unappealable deny.
+#[test]
+fn content_keys_still_bypass_the_fence() {
+    let dir = create_policy_dir("version: 1\nblocklist: []\nfence:\n  enabled: true\n");
+    let input = make_mcp_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "mcp__editor__replace",
+        serde_json::json!({
+            "path": dir.path().join("a.c").to_str().unwrap(),
+            "new_file_content": "/* leading block comment */\nint main(void){}",
+            "old_text": "/usr/share/doc"
+        }),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "file *contents* must not be fenced as locations, got: {stdout}"
+    );
+}
+
 /// `~user` was never expanded, so the value stayed relative, joined onto the
 /// cwd, resolved inside the project, and passed. This needs no MCP server —
 /// plain Bash reached the key.

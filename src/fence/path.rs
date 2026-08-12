@@ -324,16 +324,20 @@ const PATH_KEY_TOKENS: &[&str] = &[
 /// Keys whose values are file *contents* rather than locations. Without this,
 /// a C file starting with a block comment or any argument holding a leading
 /// slash would be fenced as if it were a path.
+/// Only true content *nouns* belong here. A bare modifier like `old`, `new`, or
+/// `data` says nothing about whether the value is a location, and vetoing on one
+/// silently excluded `new_path`, `old_path`, and `data_dir` from the fence —
+/// exactly the rename/move arguments a filesystem MCP server exposes. The
+/// compound forms stay listed for keys written without a separator (`oldtext`),
+/// which tokenize as one word; separated forms like `old_text` are still caught
+/// by their `text` token.
 const CONTENT_KEY_TOKENS: &[&str] = &[
     "content",
     "contents",
     "text",
     "body",
-    "data",
     "oldtext",
     "newtext",
-    "old",
-    "new",
     "patch",
     "diff",
     "message",
