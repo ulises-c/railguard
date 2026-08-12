@@ -605,6 +605,7 @@ fn cmd_status() -> i32 {
 
     print_hook_status("Claude Code", install::hooks::check_claude_installed());
     print_hook_status("Codex", install::hooks::check_codex_installed());
+    print_codex_activation_caveat();
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let loaded_policy = policy::loader::load_policy_or_defaults(&cwd);
@@ -664,9 +665,29 @@ fn cmd_status() -> i32 {
     0
 }
 
+/// A registered Codex hook is not the same as an enforcing one: Codex skips
+/// command hooks until the human has trusted them, and `[features] hooks = false`
+/// disables them outright. Say so, rather than letting a green check imply
+/// interception that may never happen.
+fn print_codex_activation_caveat() {
+    if !matches!(install::hooks::check_codex_installed(), Ok(true)) {
+        return;
+    }
+    match install::hooks::codex_hooks_feature_disabled() {
+        Some(true) => println!(
+            "       {} Codex has [features] hooks = false — registered hooks do NOT run",
+            "!".red().bold()
+        ),
+        _ => println!(
+            "       {} registered, not proven active: Codex skips command hooks until trusted",
+            "·".dimmed()
+        ),
+    }
+}
+
 fn print_hook_status(client: &str, status: Result<bool, String>) {
     match status {
-        Ok(true) => println!("  {} {} hooks installed", "✓".green().bold(), client),
+        Ok(true) => println!("  {} {} hooks registered", "✓".green().bold(), client),
         Ok(false) => println!(
             "  {} {} hooks not installed (run {})",
             "✗".yellow().bold(),

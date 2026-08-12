@@ -593,6 +593,41 @@ pub fn check_codex_installed() -> Result<bool, String> {
     check_client_installed(&codex_hooks_path())
 }
 
+/// Whether Codex has hooks switched off wholesale via `[features] hooks = false`
+/// in `~/.codex/config.toml`. A registered hook entry is inert in that state, so
+/// reporting it as active would be a false assurance on a guardrail.
+///
+/// Returns `None` when the answer can't be established (no config file, or a
+/// shape this crude scan doesn't understand) — callers should treat that as
+/// "unknown", never as "enabled".
+pub fn codex_hooks_feature_disabled() -> Option<bool> {
+    let config = dirs::home_dir()?.join(".codex").join("config.toml");
+    let contents = fs::read_to_string(config).ok()?;
+
+    let mut in_features = false;
+    for line in contents.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            in_features = line == "[features]";
+            continue;
+        }
+        if !in_features {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "hooks" {
+                return match value.trim() {
+                    "false" => Some(true),
+                    "true" => Some(false),
+                    _ => None,
+                };
+            }
+        }
+    }
+    // No explicit setting found; Codex's own default governs.
+    None
+}
+
 fn check_client_installed(path: &Path) -> Result<bool, String> {
     if !path.exists() {
         return Ok(false);
