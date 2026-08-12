@@ -279,7 +279,10 @@ blocklist:
     }
 
     #[test]
-    fn test_local_override_honored_by_default() {
+    fn test_local_override_ignored_by_default() {
+        // The override file ships inside the repository being guarded, so a
+        // clone must not be able to widen the fence without the human opting in
+        // from their own global policy.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("railguard.yaml"),
@@ -293,7 +296,7 @@ blocklist:
         .unwrap();
 
         let policy = load_policy_or_defaults(dir.path());
-        assert!(policy.fence.allowed_paths.iter().any(|p| p == "~/notes"));
+        assert!(!policy.fence.allowed_paths.iter().any(|p| p == "~/notes"));
     }
 
     #[test]

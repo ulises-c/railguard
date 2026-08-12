@@ -202,12 +202,13 @@ pub struct FenceConfig {
     #[serde(default)]
     pub denied_paths: Vec<String>,
     /// When true, a project-local `.railguard.local.yaml` may *add* to
-    /// `allowed_paths` (never remove denies). On by default: overrides are
-    /// additive-only and denied_paths always win, so a hostile repo can widen
-    /// reads/writes outside its own tree but never reach denied paths. Edits
-    /// to any railguard yaml are approval-gated. Set false to require the
-    /// human's base policy to opt each machine in.
-    #[serde(default = "default_true")]
+    /// `allowed_paths` (never remove denies). Off by default: the override file
+    /// is controlled by the repository being guarded, so honoring it by default
+    /// would let a cloned or hostile repo widen the fence across the user's home
+    /// directory with no human confirmation. Denied paths still win, but the
+    /// gap between "not denied" and "safe to write" is large. Opt in per machine
+    /// from the human's own global policy.
+    #[serde(default)]
     pub allow_local_overrides: bool,
 }
 
@@ -224,8 +225,25 @@ impl Default for FenceConfig {
                 "~/.claude".to_string(),
                 "~/.codex".to_string(),
                 "/etc".to_string(),
+                // Shell and login init files: writing any of these is arbitrary
+                // code execution on the human's next shell, so they belong with
+                // the credential stores rather than behind a mere approval prompt.
+                "~/.bashrc".to_string(),
+                "~/.bash_profile".to_string(),
+                "~/.profile".to_string(),
+                "~/.zshrc".to_string(),
+                "~/.zshenv".to_string(),
+                "~/.zprofile".to_string(),
+                "~/.config/fish".to_string(),
+                // Same reachability, one indirection out: hook/alias surfaces that
+                // run on ordinary developer commands or at login.
+                "~/.gitconfig".to_string(),
+                "~/.config/git".to_string(),
+                "~/.local/bin".to_string(),
+                "~/.config/systemd/user".to_string(),
+                "~/.config/autostart".to_string(),
             ],
-            allow_local_overrides: true,
+            allow_local_overrides: false,
         }
     }
 }

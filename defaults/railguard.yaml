@@ -79,6 +79,23 @@ fence:
     - "~/.config/gcloud"
     - "~/.codex"
     - "/etc"
+    # Shell and login init files: a write here is arbitrary code execution on
+    # the human's next shell, so they rank with the credential stores rather
+    # than behind a mere out-of-project approval prompt.
+    - "~/.bashrc"
+    - "~/.bash_profile"
+    - "~/.profile"
+    - "~/.zshrc"
+    - "~/.zshenv"
+    - "~/.zprofile"
+    - "~/.config/fish"
+    # Same reachability, one indirection out: hook and alias surfaces that run
+    # on ordinary developer commands or at login.
+    - "~/.gitconfig"
+    - "~/.config/git"
+    - "~/.local/bin"
+    - "~/.config/systemd/user"
+    - "~/.config/autostart"
 
 # ── Trace ────────────────────────────────────────────────────────────
 # Structured audit log of every tool call.

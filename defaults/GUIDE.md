@@ -76,8 +76,9 @@ the next tool call - no restart needed.
   - base rules; edits gated to **ask**.
 - **Per-project** `.railguard.local.yaml` (project root) - additive
   `fence.allowed_paths` only; cannot weaken `denied_paths` or disable the
-  fence. Honored by default (`fence.allow_local_overrides` defaults to true);
-  the global policy can opt out with `allow_local_overrides: false`.
+  fence. Ignored unless the global policy opts in with
+  `fence.allow_local_overrides: true` - the override file ships inside the
+  repository being guarded, so the project cannot opt itself in.
 - Edits to ANY railguard yaml (global or `.railguard.local.yaml`) require human
   approval. Claude Code uses **ask**; Codex denies the tool call until the human
   applies the proposed change outside Codex. They are never auto-allowed.
