@@ -15,6 +15,10 @@ carries only the core rules; this guide is printed on demand by
   will be prompted to approve or deny. Wait; don't route around it.
 - **File writes are snapshotted.** Every Write/Edit is backed up before
   execution. The human can rollback any change.
+- **Memory is guarded, not frozen.** Changing or deleting an existing memory
+  file (or a project memory directory) asks the human, and deletions are
+  snapshotted first so they can be rolled back. Deleting `~/.claude` or
+  `~/.claude/projects` wholesale is always blocked.
 - **Everything is logged.** All tool calls and decisions are recorded in
   `.railguard/traces/`.
 

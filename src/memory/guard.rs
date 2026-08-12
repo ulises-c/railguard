@@ -145,14 +145,14 @@ pub fn check_memory_write(
                 // Full overwrite of existing memory — requires approval
                 return MemoryDecision::Approve(format!(
                     "Memory Safety: Agent wants to overwrite existing memory file '{}'. \
-                     Memory is append-only — modifications require approval.",
+                     Changing existing memories requires approval.",
                     short_path(file_path)
                 ));
             } else if tool_name == "Edit" {
                 // Edit of existing memory — requires approval
                 return MemoryDecision::Approve(format!(
                     "Memory Safety: Agent wants to modify existing memory file '{}'. \
-                     Memory is append-only — modifications require approval.",
+                     Changing existing memories requires approval.",
                     short_path(file_path)
                 ));
             }
