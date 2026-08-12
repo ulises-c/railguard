@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// How many subsequent tool calls a denial keeps watching for an altered retry.
+const RETRY_WINDOW_CALLS: u64 = 3;
+
 /// Persistent session state for threat detection.
 /// Stored at `.railguard/state/{session_id}.json`.
 /// Each hook invocation loads, modifies, and saves this state.
@@ -14,8 +17,6 @@ pub struct SessionState {
     pub block_history: Vec<BlockEvent>,
     /// Tool call count at which heightened mode expires
     pub heightened_until_call: Option<u64>,
-    /// Keywords to watch for during heightened state
-    pub heightened_keywords: Vec<String>,
     /// Threat patterns the user has approved for this session.
     /// Once approved, the same pattern won't prompt again.
     #[serde(default)]
@@ -62,6 +63,11 @@ pub struct BlockEvent {
     pub rule: String,
     pub keywords: Vec<String>,
     pub tier: u8,
+    /// True only when the command was actually denied (policy block, path
+    /// fence). Asks (tier 1/2/3 approval prompts) are recorded for audit but
+    /// are not "blocked commands" for retry detection.
+    #[serde(default)]
+    pub denied: bool,
 }
 
 impl SessionState {
@@ -73,7 +79,6 @@ impl SessionState {
             warning_count: 0,
             block_history: Vec::new(),
             heightened_until_call: None,
-            heightened_keywords: Vec::new(),
             session_approvals: Vec::new(),
             pending_approval: None,
             project_root: None,
@@ -255,13 +260,41 @@ impl SessionState {
             tool_call_count: self.tool_call_count,
             command: command.chars().take(500).collect(),
             rule: rule.to_string(),
-            keywords: keywords.clone(),
+            keywords,
             tier,
+            denied: true,
         });
 
-        // Enter heightened state: watch for keywords in next 3 tool calls
-        self.heightened_until_call = Some(self.tool_call_count + 3);
-        self.heightened_keywords = keywords;
+        // Enter heightened state: watch for retries over the next few calls.
+        self.heightened_until_call = Some(self.tool_call_count + RETRY_WINDOW_CALLS);
+    }
+
+    /// Record an approval prompt. Kept in history for audit, but an ask is not
+    /// a block: it must not arm the retry-detection window, or routine
+    /// commands after a false-positive ask cascade into Tier 3 (issue #18).
+    pub fn record_ask(&mut self, command: &str, rule: &str, keywords: Vec<String>, tier: u8) {
+        self.block_history.push(BlockEvent {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            tool_call_count: self.tool_call_count,
+            command: command.chars().take(500).collect(),
+            rule: rule.to_string(),
+            keywords,
+            tier,
+            denied: false,
+        });
+    }
+
+    /// Denied commands still inside the retry-watch window, newest first.
+    /// `block_history` is append-only in ascending `tool_call_count`, so once a
+    /// scanned-from-the-end entry falls outside the window every earlier one
+    /// does too — stop there instead of scanning the whole (unbounded) history.
+    pub fn recent_denied_blocks(&self) -> impl Iterator<Item = &BlockEvent> {
+        let cutoff = self.tool_call_count;
+        self.block_history
+            .iter()
+            .rev()
+            .take_while(move |b| cutoff <= b.tool_call_count + RETRY_WINDOW_CALLS)
+            .filter(|b| b.denied)
     }
 
     pub fn record_warning(&mut self) {
@@ -507,14 +540,13 @@ mod tests {
     fn test_resolve_cwd_fallback_is_untrustworthy() {
         // First call outside any repo: resolves to cwd but must be flagged
         // untrustworthy so the caller does not persist it as the sticky anchor.
-        let outside = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
         let (root, source) = SessionState::resolve_project_root_with_source(
-            outside.path(),
+            Path::new("/"),
             "fresh",
             sessions.path(),
         );
-        assert_eq!(root, outside.path());
+        assert_eq!(root, Path::new("/"));
         assert_eq!(source, RootSource::CwdFallback);
         assert!(!source.is_trustworthy());
     }
@@ -528,9 +560,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join(".git")).unwrap();
         let state_dir = root.path().join(".railguard/state");
         let mut state = SessionState::new("poisoned");
-        // The temp parent exists but is not a git repo — the kind of broad root
-        // (cf. "/", "/home", "/tmp") a poisoned/garbage anchor would name.
-        state.project_root = Some(root.path().parent().unwrap().display().to_string());
+        state.project_root = Some("/".to_string());
         state.save(&state_dir).unwrap();
         let sessions = tempfile::tempdir().unwrap();
 
@@ -558,8 +588,7 @@ mod tests {
     #[test]
     fn test_anchor_to_persist_only_inside_git_project() {
         // A bare cwd outside any repo is not a persistable anchor.
-        let no_git = tempfile::tempdir().unwrap();
-        assert_eq!(SessionState::anchor_to_persist(no_git.path()), None);
+        assert_eq!(SessionState::anchor_to_persist(Path::new("/")), None);
         // Inside a repo, the git root is returned (even from a subdir).
         let repo = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repo.path().join(".git")).unwrap();

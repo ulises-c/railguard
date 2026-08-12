@@ -293,6 +293,382 @@ fn tier3_retry_after_block_asks_user() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// ISSUE #18: detector false positives
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn benign_git_sequence_never_flagged() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let input1 = make_bash_input(
+        &sid,
+        cwd,
+        r#"git add src/foo.rs && git commit -m "fix: update foo""#,
+    );
+    let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
+    assert!(!output_is_not_allowed(&stdout1), "first git: {}", stdout1);
+
+    let input2 = make_bash_input(&sid, cwd, "git log --oneline -1 && grep -n foo src/foo.rs");
+    let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
+    assert!(!output_is_not_allowed(&stdout2), "second git: {}", stdout2);
+}
+
+#[test]
+fn signal_words_in_commit_message_allowed() {
+    // Signal words inside message text ("python3 -e ... b64decode") are data,
+    // not an interpreter payload. Must pass the classifier AND the policy
+    // blocklist — the old whole-text interpreter-obfuscation rule hard-blocked
+    // this with no approval path.
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let input = make_bash_input(
+        &sid,
+        cwd,
+        r#"git commit -m "document python3 -e usage and b64decode helper""#,
+    );
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "signal words in a commit message must be allowed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn tier1_ask_does_not_cascade_into_tier3() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    // A Tier-1 ask (transform-pipe-to-shell) whose text shares words with the
+    // routine follow-up. The ask must not arm retry detection.
+    let input1 = make_bash_input(&sid, cwd, "rev <<< 'railguard yaml reorder' | sh");
+    let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
+    assert!(
+        output_contains_ask(&stdout1),
+        "tier1 should ask: {}",
+        stdout1
+    );
+
+    let input2 = make_bash_input(
+        &sid,
+        cwd,
+        r#"git add railguard.yaml && git commit -m "reorder yaml""#,
+    );
+    let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
+    assert!(
+        !output_is_not_allowed(&stdout2),
+        "routine command after a tier1 ask must not be flagged: {}",
+        stdout2
+    );
+}
+
+#[test]
+fn heredoc_python_clean_allowed() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let cmd = "python3 - <<'PY'\n\
+               import re\n\
+               text = open('railguard.yaml').read()\n\
+               open('railguard.yaml', 'w').write('\\n'.join(sorted(text.split('\\n'))))\n\
+               PY";
+    let input = make_bash_input(&sid, cwd, cmd);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "clean heredoc script must be allowed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn heredoc_python_obfuscated_asks() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let cmd = "python3 - <<'PY'\n\
+               import base64, os\n\
+               os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())\n\
+               PY";
+    let input = make_bash_input(&sid, cwd, cmd);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "obfuscated heredoc payload must be caught: {}",
+        stdout
+    );
+}
+
+#[test]
+fn interpreter_option_values_do_not_hide_heredoc_obfuscation() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "python3 -W ignore <<'PY'\n\
+         import base64, os\n\
+         os.system(base64.b64decode('eA==').decode())\n\
+         PY",
+        "bash -O extglob <<'SH'\n\
+         python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+         SH",
+        "php -c php.ini <<'PHP'\n\
+         eval(base64_decode('ZWNobyAxOw=='));\n\
+         PHP",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "interpreter option hid heredoc obfuscation: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn heredoc_data_for_python_script_allowed() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let cmd = "python3 helper.py <<'EOF'\n\
+               note: use the b64decode helper\n\
+               EOF";
+    let input = make_bash_input(&sid, cwd, cmd);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "heredoc data for a script file must be allowed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn heredoc_before_program_definition_is_data() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "python3 <<'EOF' -c \"print('safe')\"\n\
+         note: use the b64decode helper\n\
+         EOF",
+        "python3 <<'EOF' helper.py\n\
+         note: use the b64decode helper\n\
+         EOF",
+        "python3 <<'EOF' 2>&1 helper.py\n\
+         note: use the b64decode helper\n\
+         EOF",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            !output_is_not_allowed(&stdout),
+            "heredoc data was treated as code: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn unrecognized_runners_do_not_hide_obfuscated_payloads() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "strace python3 -c \"import os; os.system(chr(108)+chr(115))\"",
+        "taskset -c 0 python3 -c \"import os; os.system(chr(108)+chr(115))\"",
+        "watch -n 1 python3 -c \"import os; os.system(chr(108)+chr(115))\"",
+        "systemd-run --user python3 -c \"import os; os.system(chr(108)+chr(115))\"",
+        "strace bash <<'SH'\n\
+         python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+         SH",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "runner hid an obfuscated payload: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn shell_heredoc_nesting_an_inline_payload_asks() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "bash <<'SH'\n\
+         python3 -c \"import os; os.system(chr(108)+chr(115))\"\n\
+         SH",
+        "sh <<'SH'\n\
+         python3 -c \"import os; os.system(chr(108)+chr(115))\"\n\
+         SH",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "heredoc script hid a nested inline payload: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn xargs_stdin_is_argument_data_not_code() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "xargs bash <<'EOF'\n\
+         note: use the b64decode helper\n\
+         EOF",
+        "xargs -n 1 bash <<'EOF'\n\
+         note: use the b64decode helper\n\
+         EOF",
+        "xargs bash <<< 'note: use the b64decode helper'",
+        "grep python3 <<'EOF'\n\
+         x = eval(compile(src))\n\
+         EOF",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            !output_is_not_allowed(&stdout),
+            "stdin data was treated as code: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn xargs_arg_file_heredoc_is_still_a_script() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    let command = "xargs -a args.txt bash -s <<'EOF'\n\
+                   python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+                   EOF";
+    let input = make_bash_input(&unique_session_id(), cwd, command);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "xargs -a hid a heredoc script: {command}\n{stdout}"
+    );
+}
+
+#[test]
+fn xargs_inline_payload_still_scanned() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    let command = "ls | xargs bash -c \
+                   \"python3 -c \\\"import base64,os; \
+                   os.system(base64.b64decode('eA==').decode())\\\"\"";
+    let input = make_bash_input(&unique_session_id(), cwd, command);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "xargs hid an inline obfuscated payload: {command}\n{stdout}"
+    );
+}
+
+#[test]
+fn herestring_classification_uses_complete_command() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let cases = [
+        (
+            "python3 <<< 'note: use the b64decode helper' -c \"print('safe')\"",
+            false,
+        ),
+        (
+            "python3 -W ignore <<< \"import base64,os; \
+             os.system(base64.b64decode('eA==').decode())\"",
+            true,
+        ),
+        (
+            "env --split-string=\"bash -s\" <<< \
+             \"python3 -c \\\"import base64,os; os.system(base64.b64decode('eA==').decode())\\\"\"",
+            true,
+        ),
+    ];
+
+    for (command, should_ask) in cases {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert_eq!(
+            output_is_not_allowed(&stdout),
+            should_ask,
+            "incorrect here-string classification: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn env_split_string_shell_heredoc_obfuscation_asks() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        "env -S \"bash -s\" <<'SH'\n\
+         python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+         SH",
+        "env --split-string=\"bash -s\" <<'SH'\n\
+         python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+         SH",
+        "env --split-string=\"-u FOO bash -s\" <<'SH'\n\
+         python3 -c \"import base64,os; os.system(base64.b64decode('eA==').decode())\"\n\
+         SH",
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "env split-string hid an obfuscated heredoc: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn wrapper_option_values_do_not_hide_obfuscated_payloads() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    for command in [
+        r#"sudo -u root python3 -c "import base64,os; os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())""#,
+        r#"env -u FOO python3 -c "import base64,os; os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())""#,
+        r#"env -S "python3 -c \"import base64,os; os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())\"""#,
+    ] {
+        let input = make_bash_input(&unique_session_id(), cwd, command);
+        let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "wrapper hid obfuscated payload: {command}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn combined_shell_flags_do_not_hide_obfuscated_payloads() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let command = r#"bash -cx "python3 -c \"import base64,os; os.system(base64.b64decode('dGVycmFmb3JtIGRlc3Ryb3k=').decode())\"""#;
+    let input = make_bash_input(&unique_session_id(), cwd, command);
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+
+    assert!(
+        output_is_not_allowed(&stdout),
+        "combined shell flags hid obfuscated payload: {stdout}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // SESSION STATE PERSISTENCE
 // ═══════════════════════════════════════════════════════════════════
 

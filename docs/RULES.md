@@ -31,8 +31,11 @@ Railguard ships with sensible defaults. Destructive commands require your approv
 | `base64-to-shell` | `base64 -d \| sh` |
 | `printf-hex-exec` | `$(printf '\x...')` in command position |
 | `transform-pipe-to-shell` | `rev \| sh`, `tr \| sh`, `sed \| sh` |
-| `interpreter-obfuscation` | Python/Ruby with chr(), b64decode, system() |
 | `git-config-global-write` | `git config --global` writes |
+
+Interpreter obfuscation (`python3 -c` with b64decode, bare eval/exec, heredoc
+payloads) is detected by the Tier-1 threat classifier, which runs before policy
+rules and scopes its signals to the executable payload - not a policy rule.
 
 ### Self-protection (hard block)
 

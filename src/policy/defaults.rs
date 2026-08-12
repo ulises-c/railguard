@@ -284,13 +284,11 @@ pub fn default_blocklist() -> Vec<Rule> {
             action: "block".to_string(),
             message: Some("Blocked: text transform piped to shell can construct any command".to_string()),
         },
-        Rule {
-            name: "interpreter-obfuscation".to_string(),
-            tool: "Bash".to_string(),
-            pattern: r#"(?:python3?|ruby|perl|node)\s+-[ec]\s+.*(?:b64decode|b64encode|base64\..*decode|chr\s*\(|\\x[0-9a-fA-F]{2}|eval\s*\(|exec\s*\(|system\s*\(|os\.system|os\.popen|subprocess|Popen\s*\(|fromCharCode|['"]/'*\s*\.\s*join\s*\(|open\s*\(.*\.join\s*\(|open\s*\(.*chr\s*\()"#.to_string(),
-            action: "block".to_string(),
-            message: Some("Blocked: interpreter with string obfuscation can bypass command detection".to_string()),
-        },
+        // No interpreter-obfuscation rule here: evasion::is_interpreter_obfuscation
+        // (Tier 1, runs before policy evaluation) is the authoritative detector —
+        // payload-scoped, covers heredocs, and its ask can be session-approved.
+        // A whole-text regex backstop only ever fired on commands the classifier
+        // had already cleared, i.e. false positives on message text (issue #18).
         // ── Self-protection — always block (agent can't disable guardrails) ──
         Rule {
             name: "railguard-uninstall".to_string(),
@@ -404,7 +402,6 @@ mod tests {
         let block_rules = [
             "base64-to-shell",
             "transform-pipe-to-shell",
-            "interpreter-obfuscation",
             "printf-hex-exec",
         ];
         for name in &block_rules {

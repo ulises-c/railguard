@@ -31,34 +31,31 @@ pub fn classify_threat(cmd: &str) -> Option<ThreatTier> {
     None
 }
 
-/// Check for behavioral evasion (Tier 3): retry of blocked command.
-/// Looks at the session state to see if the current command contains
-/// keywords from recently blocked commands.
+/// Check for behavioral evasion (Tier 3): retry of a blocked command.
+/// Compares the command against each recently DENIED command's own keywords —
+/// approval prompts (asks) never arm this, so a session with no actual deny
+/// can never produce a "retried a blocked command" flag (issue #18).
 pub fn check_behavioral_evasion(state: &SessionState, cmd: &str) -> Option<ThreatTier> {
     if !state.is_in_heightened_state() {
         return None;
     }
 
     let cmd_lower = cmd.to_lowercase();
-    let matched: Vec<String> = state
-        .heightened_keywords
-        .iter()
-        .filter(|kw| cmd_lower.contains(&kw.to_lowercase()))
-        .cloned()
-        .collect();
+    for event in state.recent_denied_blocks() {
+        let matched: Vec<String> = event
+            .keywords
+            .iter()
+            .filter(|kw| cmd_lower.contains(&kw.to_lowercase()))
+            .cloned()
+            .collect();
 
-    // Need at least 2 keyword matches to trigger (avoid single common words)
-    if matched.len() >= 2 {
-        let original_rule = state
-            .block_history
-            .last()
-            .map(|b| b.rule.clone())
-            .unwrap_or_default();
-
-        return Some(ThreatTier::Tier3 {
-            original_rule,
-            matched_keywords: matched,
-        });
+        // Need at least 2 keyword matches to trigger (avoid single common words)
+        if matched.len() >= 2 {
+            return Some(ThreatTier::Tier3 {
+                original_rule: event.rule.clone(),
+                matched_keywords: matched,
+            });
+        }
     }
 
     None
@@ -234,6 +231,78 @@ mod tests {
 
         // Unrelated command
         let result = check_behavioral_evasion(&state, "npm test");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_no_behavioral_evasion_without_denied_block() {
+        // Issue #18: an ask (not a deny) must not arm retry detection, so a
+        // routine command afterwards is never flagged as a retry.
+        let mut state = SessionState::new("test");
+        state.tool_call_count = 5;
+        state.record_ask(
+            "python3 - <<'PY'",
+            "interpreter-obfuscation",
+            vec![
+                "python3".to_string(),
+                "yaml".to_string(),
+                "reorder".to_string(),
+            ],
+            1,
+        );
+        state.tool_call_count = 6;
+
+        let result = check_behavioral_evasion(
+            &state,
+            r#"git add railguard.yaml && git commit -m "reorder yaml keys""#,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_behavioral_evasion_matches_denied_event_not_last_ask() {
+        // A real deny must still be caught even when a later, unrelated ask is
+        // the most recent history entry.
+        let mut state = SessionState::new("test");
+        state.tool_call_count = 10;
+        state.record_block(
+            "terraform destroy",
+            "terraform-destroy",
+            vec!["terraform".to_string(), "destroy".to_string()],
+            1,
+        );
+        state.tool_call_count = 11;
+        state.record_ask(
+            "git commit -m wip",
+            "behavioral-evasion",
+            vec!["git".to_string(), "commit".to_string()],
+            3,
+        );
+        state.tool_call_count = 12;
+
+        let result = check_behavioral_evasion(&state, "terraform apply -destroy");
+        match result {
+            Some(ThreatTier::Tier3 { original_rule, .. }) => {
+                assert_eq!(original_rule, "terraform-destroy");
+            }
+            other => panic!("expected Tier3 from the denied event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_routine_command_after_unrelated_deny_not_flagged() {
+        let mut state = SessionState::new("test");
+        state.tool_call_count = 10;
+        state.record_block(
+            "terraform destroy",
+            "terraform-destroy",
+            vec!["terraform".to_string(), "destroy".to_string()],
+            1,
+        );
+        state.tool_call_count = 11;
+
+        // Shares no terraform keywords → not a retry.
+        let result = check_behavioral_evasion(&state, r#"git add x && git commit -m "fix""#);
         assert!(result.is_none());
     }
 }

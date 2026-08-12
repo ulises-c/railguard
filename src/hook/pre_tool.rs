@@ -78,7 +78,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             state.suspicion_level = 0;
             state.warning_count = 0;
             state.block_history.clear();
-            state.heightened_keywords.clear();
+            state.heightened_until_call = None;
             let _ = state.save(&state_dir);
             // Fall through to normal evaluation
         } else {
@@ -139,7 +139,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 };
             } else {
                 let keywords = extract_keywords(&command);
-                state.record_block(&command, "behavioral-evasion", keywords, 3);
+                state.record_ask(&command, "behavioral-evasion", keywords, 3);
                 state.set_pending_approval(&pattern_key);
                 let _ = state.save(&state_dir);
 
@@ -178,14 +178,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                             start,
                         );
                         let _ = state.save(&state_dir);
-                        let _ = state.save(&state_dir);
                         return PreToolResult {
                             output: HookOutput::allow(),
                             terminate: None,
                         };
                     } else {
                         let keywords = extract_keywords(&command);
-                        state.record_block(&command, pattern, keywords, 1);
+                        state.record_ask(&command, pattern, keywords, 1);
                         state.set_pending_approval(&pattern_key);
                         let _ = state.save(&state_dir);
 
@@ -230,7 +229,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                     } else if state.warning_count >= 1 {
                         // Second occurrence: ask user instead of terminating
                         let keywords = extract_keywords(&command);
-                        state.record_block(&command, pattern, keywords, 2);
+                        state.record_ask(&command, pattern, keywords, 2);
                         state.set_pending_approval(&pattern_key);
                         let _ = state.save(&state_dir);
 
