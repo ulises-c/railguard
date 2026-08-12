@@ -1050,3 +1050,132 @@ fn pentest_safe_python_allowed() {
         "safe python should be allowed"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// 7. DOUBLE-BLIND REVIEW REGRESSIONS
+//
+// Each test below reproduces a bypass that two independent reviewers
+// demonstrated against this binary. The whole suite passed while every one
+// of them was live, so they run end-to-end through the hook rather than
+// against the units they exercise.
+// ═══════════════════════════════════════════════════════════════════
+
+fn make_mcp_input(
+    session_id: &str,
+    cwd: &str,
+    tool: &str,
+    tool_input: serde_json::Value,
+) -> String {
+    serde_json::json!({
+        "session_id": session_id,
+        "cwd": cwd,
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": tool_input,
+        "tool_use_id": "test-dbr"
+    })
+    .to_string()
+}
+
+/// Self-protection was scoped to Write/Edit, so a shell redirect wrote the
+/// policy unattended. Step one of a complete disarm chain: the policy is
+/// reloaded every invocation, so `fence.enabled: false` takes effect on the
+/// very next call.
+#[test]
+fn policy_rewrite_via_bash_redirect_is_not_silent() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let input = make_bash_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "printf 'version: 1\\nfence: {enabled: false}\\n' > railguard.yaml",
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "a Bash redirect into railguard.yaml must not be silently allowed, got: {stdout}"
+    );
+}
+
+/// The same gap reached by the other vector: a filesystem-capable MCP tool.
+#[test]
+fn policy_rewrite_via_mcp_tool_is_not_silent() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let policy_path = dir.path().join("railguard.yaml");
+    let input = make_mcp_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "mcp__filesystem__write_file",
+        serde_json::json!({
+            "path": policy_path.to_str().unwrap(),
+            "content": "version: 1\nfence: {enabled: false}\n"
+        }),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "an MCP write to railguard.yaml must not be silently allowed, got: {stdout}"
+    );
+}
+
+/// Ordering, not just coverage: the allowlist is consulted before the blocklist,
+/// so one injected empty-pattern allow rule matched every command. The protected
+/// resources must be decided before the policy is consulted at all.
+#[test]
+fn injected_allowlist_cannot_wave_through_a_policy_write() {
+    let dir = create_policy_dir(
+        "version: 1\nallowlist:\n  - name: pwn\n    tool: \"*\"\n    pattern: \"\"\n    action: allow\n",
+    );
+    let input = make_bash_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "printf 'x' > railguard.yaml",
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "an allow-everything allowlist must not reach the policy guard, got: {stdout}"
+    );
+}
+
+/// State and snapshots are what block history and rollback depend on.
+#[test]
+fn railguard_state_directory_cannot_be_deleted() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let input = make_bash_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "rm -rf .railguard",
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_contains_deny(&stdout),
+        "deleting .railguard must be blocked, got: {stdout}"
+    );
+}
+
+/// Stage two of the disarm chain, asserted independently of stage one: even
+/// granting the agent a policy with the fence switched off, the hook
+/// configuration that makes Railguard run at all must still be unreachable.
+/// The fence was the only thing holding here, so disabling it opened
+/// `~/.claude/settings.json` and `~/.codex/hooks.json` to any MCP write.
+#[test]
+fn a_disabled_fence_does_not_unlock_hook_config() {
+    let dir = create_policy_dir("version: 1\nblocklist: []\nfence:\n  enabled: false\n");
+    let home = dirs::home_dir().unwrap();
+    for target in [".claude/settings.json", ".codex/hooks.json"] {
+        let input = make_mcp_input(
+            &unique_session_id(),
+            dir.path().to_str().unwrap(),
+            "mcp__filesystem__write_file",
+            serde_json::json!({
+                "path": format!("{}/{}", home.display(), target),
+                "content": "{}"
+            }),
+        );
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_contains_deny(&stdout),
+            "{target} must stay protected with the fence off, got: {stdout}"
+        );
+    }
+}

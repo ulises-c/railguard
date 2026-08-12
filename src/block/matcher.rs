@@ -40,7 +40,7 @@ fn decision_for(rule: &Rule) -> Decision {
     }
 }
 
-fn restrictiveness(decision: &Decision) -> u8 {
+pub(crate) fn restrictiveness(decision: &Decision) -> u8 {
     match decision {
         Decision::Allow => 0,
         Decision::Approve { .. } => 1,

@@ -5,6 +5,7 @@ use crate::block::evasion;
 use crate::fence::path::{check_path_from, extract_file_paths, PathCheck};
 use crate::memory::guard as memory_guard;
 use crate::policy::engine::evaluate;
+use crate::policy::protected;
 use crate::snapshot::capture::capture_snapshot;
 use crate::threat::classifier::{
     check_behavioral_evasion, classify_threat, extract_keywords, ThreatTier,
@@ -486,9 +487,33 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
         }
     }
 
+    // === PROTECTED RESOURCES (decided ahead of the policy) ===
+
+    // Read-only callers are exempt — the guard stops modification, and denying
+    // `grep -rn '\.railguard' src/` would be pure false positive. Bash paths are
+    // extracted from the command itself, so they inherit the command's verdict
+    // rather than being judged on their own.
+    let command_exempt = command.is_empty() || is_read_only_command(&command);
+    let paths_exempt = is_read_only_tool(tool_name) || (tool_name == "Bash" && command_exempt);
+    let mut guarded: Vec<&str> = Vec::new();
+    if !command_exempt {
+        guarded.push(command.as_str());
+    }
+    if !paths_exempt {
+        guarded.extend(file_paths.iter().map(String::as_str));
+    }
+    let protected_decision = protected::check(guarded);
+
     // === POLICY EVALUATION (allowlist → blocklist → approve) ===
 
-    let mut decision = evaluate(policy, tool_name, &tool_input);
+    // A protected-resource hit stands without consulting the policy at all: the
+    // allowlist is evaluated first during normal evaluation, so a policy an
+    // agent managed to write could otherwise allow the write that produced it.
+    let mut decision = if matches!(protected_decision, Decision::Allow) {
+        evaluate(policy, tool_name, &tool_input)
+    } else {
+        protected_decision
+    };
 
     // Every built-in rule is scoped to `tool: "Bash"`, so a shell command
     // arriving under some other tool name matched nothing. Re-evaluate the
