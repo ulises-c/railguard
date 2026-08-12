@@ -50,6 +50,22 @@ pub fn check_path_from(
         return PathCheck::Allow;
     }
 
+    // `~user/...` — another account's home. Bash performs this expansion, so
+    // leaving it unresolved meant the value stayed *relative*, was joined onto
+    // the cwd, resolved inside the project, and passed: `cat ~someone/.ssh/id_rsa`
+    // read the key. Resolving it is only a heuristic (see `expand_path`), and the
+    // denied-path list is written against the *current* user's home, so a
+    // resolved `~other/.ssh` would not match `~/.ssh` either. An agent has no
+    // routine reason to reach into another account's home, so this is a hard
+    // denial rather than an approval prompt — which, for a read-only command,
+    // would be waived anyway.
+    if let Some(user) = other_user_home(file_path) {
+        return PathCheck::Denied(format!(
+            "Path Fence: '{}' reaches into another user's home directory (~{})",
+            file_path, user
+        ));
+    }
+
     let cwd = project_root;
     let expanded = expand_path(file_path);
     let resolved = if Path::new(&expanded).is_absolute() {
@@ -137,6 +153,16 @@ fn canonicalize_best_effort(path: &str) -> String {
     path.to_string()
 }
 
+/// The account named by a `~user` prefix, if the path uses one. The current
+/// user's own `~` and `~/…` are not this, and neither is a bare `~`.
+fn other_user_home(path: &str) -> Option<String> {
+    let rest = path.trim().strip_prefix('~')?;
+    if rest.is_empty() || rest.starts_with('/') {
+        return None;
+    }
+    Some(rest.split('/').next().unwrap_or(rest).to_string())
+}
+
 /// Check if a path is a /dev/* device path (always allowed).
 fn is_dev_path(path: &str) -> bool {
     let p = path.trim();
@@ -163,9 +189,33 @@ fn expand_path(path: &str) -> String {
             return format!("{}{}", home.display(), &path[1..]);
         }
     }
-    if path.starts_with("$HOME") {
-        if let Some(home) = dirs::home_dir() {
-            return path.replace("$HOME", &home.display().to_string());
+    // `~user/...`. Bash performs this expansion, so leaving it unexpanded meant
+    // the value stayed *relative*, got joined onto the cwd, resolved inside the
+    // project, and passed the fence — `cat ~someone/.ssh/id_rsa` read the key.
+    // Sibling-of-home is a heuristic (wrong for accounts outside the usual home
+    // parent, e.g. ~root), but it always yields an absolute path outside the
+    // project, so an inexact guess fails toward an approval prompt rather than a
+    // silent allow.
+    if let Some(rest) = path.strip_prefix('~') {
+        if !rest.is_empty() && !rest.starts_with('/') {
+            let (user, tail) = match rest.find('/') {
+                Some(index) => (&rest[..index], &rest[index..]),
+                None => (rest, ""),
+            };
+            if let Some(home) = dirs::home_dir() {
+                if let Some(home_parent) = home.parent() {
+                    return format!("{}{}", home_parent.join(user).display(), tail);
+                }
+            }
+        }
+    }
+    // `${HOME}` as well as `$HOME`: the brace form is ordinary shell syntax and
+    // skipping it left the same hole on the Write/Edit and MCP paths.
+    for var in ["${HOME}", "$HOME"] {
+        if path.starts_with(var) {
+            if let Some(home) = dirs::home_dir() {
+                return path.replacen(var, &home.display().to_string(), 1);
+            }
         }
     }
     path.to_string()
@@ -357,10 +407,13 @@ fn looks_like_path(value: &str) -> bool {
         .strip_prefix("file://localhost")
         .or_else(|| value.strip_prefix("file://"))
         .unwrap_or(value);
+    // Any `~` form, not just `~/` — `~user/...` is a real absolute location once
+    // the shell expands it, and treating it as an ordinary relative string is
+    // what let it resolve inside the project.
     let rooted = value.starts_with('/')
-        || value.starts_with("~/")
-        || value == "~"
-        || value.starts_with("$HOME");
+        || value.starts_with('~')
+        || value.starts_with("$HOME")
+        || value.starts_with("${HOME}");
     rooted || escapes_upward(value)
 }
 

@@ -1153,6 +1153,43 @@ fn railguard_state_directory_cannot_be_deleted() {
     );
 }
 
+/// `~user` was never expanded, so the value stayed relative, joined onto the
+/// cwd, resolved inside the project, and passed. This needs no MCP server —
+/// plain Bash reached the key.
+#[test]
+fn other_users_home_is_denied() {
+    let dir = create_policy_dir("version: 1\nblocklist: []\nfence:\n  enabled: true\n");
+    let input = make_bash_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "cat ~someoneelse/.ssh/id_rsa",
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_contains_deny(&stdout),
+        "reading another user's home must be denied, got: {stdout}"
+    );
+}
+
+/// `looks_like_path` tested `$HOME` but not the brace form, so `${HOME}/...`
+/// slipped past on the Write/Edit and MCP paths.
+#[test]
+fn brace_home_form_is_fenced() {
+    let dir = create_policy_dir(
+        "version: 1\nblocklist: []\nfence:\n  enabled: true\n  denied_paths:\n    - \"~/.ssh\"",
+    );
+    let input = make_write_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "${HOME}/.ssh/authorized_keys",
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_contains_deny(&stdout),
+        "${{HOME}} must expand before the fence check, got: {stdout}"
+    );
+}
+
 /// Stage two of the disarm chain, asserted independently of stage one: even
 /// granting the agent a policy with the fence switched off, the hook
 /// configuration that makes Railguard run at all must still be unreachable.
