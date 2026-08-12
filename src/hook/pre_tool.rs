@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::block::evasion;
-use crate::fence::path::{check_path_from, extract_file_paths, PathCheck};
+use crate::fence::path::{absolutize_from, check_path_from, extract_file_paths, PathCheck};
 use crate::memory::guard as memory_guard;
 use crate::policy::engine::evaluate;
 use crate::policy::protected;
@@ -530,10 +530,22 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
 
     match &decision {
         Decision::Allow => {
+            // Lock identity and snapshot manifests outlive this call, so they
+            // must not depend on the cwd of whoever reads them later. Patch
+            // paths are typically relative: recording a bare `file.txt` meant
+            // `railguard rollback`, run from anywhere else, resolved it against
+            // its own cwd and restored over a different file — or deleted one,
+            // for an entry marked as newly created. Two sessions could likewise
+            // hold what each believed was the lock for the same file.
+            let recorded_paths: Vec<String> = file_paths
+                .iter()
+                .map(|file_path| absolutize_from(file_path, &input.cwd))
+                .collect();
+
             // Coordination: acquire file lock for Write/Edit
             if is_file_edit_tool(tool_name) {
                 let mut acquired: Vec<&String> = Vec::new();
-                for file_path in &file_paths {
+                for file_path in &recorded_paths {
                     if let Some(deny_msg) =
                         crate::coord::context::check_file_conflict(file_path, &input.session_id)
                     {
@@ -563,7 +575,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
 
             // Snapshot before Write/Edit (if enabled)
             if snapshot_enabled_for(policy, tool_name) {
-                capture_file_snapshots(input, policy, &fence_root, &file_paths);
+                capture_file_snapshots(input, policy, &fence_root, &recorded_paths);
             }
 
             log_decision(input, policy, tool_name, &tool_input, "allow", None, start);

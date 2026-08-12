@@ -116,6 +116,29 @@ pub fn check_path_from(
     PathCheck::Allow
 }
 
+/// Resolve a tool-supplied path to an absolute location for *recording* — lock
+/// identity and snapshot manifest entries.
+///
+/// Both used to store whatever string the tool supplied. Patch paths are
+/// typically relative, so a patch applied from a nested cwd recorded bare
+/// `file.txt`; `railguard rollback` later resolved that against whatever cwd the
+/// human happened to run it from, overwriting — or, for an entry marked as newly
+/// created, deleting — a different file, while leaving the intended one
+/// modified. Lock keys had the same ambiguity, so two sessions could hold what
+/// they each thought was the lock for the same file.
+///
+/// Resolution matches [`check_path_from`] so a path is recorded as the same
+/// location the fence judged.
+pub fn absolutize_from(path: &str, call_cwd: &str) -> String {
+    let expanded = expand_path(path);
+    let resolved = if Path::new(&expanded).is_absolute() {
+        expanded
+    } else {
+        Path::new(call_cwd).join(expanded).display().to_string()
+    };
+    canonicalize_best_effort(&resolved)
+}
+
 /// Canonicalize a path, resolving symlinks and ../
 /// If the file doesn't exist yet, canonicalize the deepest existing ancestor
 /// and append the remaining components.

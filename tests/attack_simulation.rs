@@ -1190,6 +1190,54 @@ fn brace_home_form_is_fenced() {
     );
 }
 
+/// Snapshot manifests recorded whatever string the tool supplied. A relative
+/// path from a nested cwd therefore resolved against the *rollback caller's*
+/// cwd, restoring over — or, for an entry marked as newly created, deleting —
+/// an entirely different file.
+#[test]
+fn snapshot_manifest_records_an_absolute_path() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let nested = dir.path().join("nested/deeper");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("file.txt"), "original").unwrap();
+
+    let session = unique_session_id();
+    let input = serde_json::json!({
+        "session_id": session,
+        "cwd": nested.to_str().unwrap(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": { "file_path": "file.txt", "content": "overwritten" },
+        "tool_use_id": "test-snap-rel"
+    })
+    .to_string();
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "an ordinary in-project write should be allowed, got: {stdout}"
+    );
+
+    let manifest = dir
+        .path()
+        .join(".railguard/snapshots")
+        .join(&session)
+        .join("manifest.jsonl");
+    let contents = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("no manifest at {}: {e}", manifest.display()));
+    let entry: serde_json::Value =
+        serde_json::from_str(contents.lines().next().expect("empty manifest")).unwrap();
+    let recorded = entry["file_path"].as_str().unwrap();
+
+    assert!(
+        std::path::Path::new(recorded).is_absolute(),
+        "manifest must record an absolute path, got {recorded:?}"
+    );
+    assert!(
+        recorded.ends_with("nested/deeper/file.txt"),
+        "manifest must record the file the write actually touched, got {recorded:?}"
+    );
+}
+
 /// Stage two of the disarm chain, asserted independently of stage one: even
 /// granting the agent a policy with the fence switched off, the hook
 /// configuration that makes Railguard run at all must still be unreachable.
