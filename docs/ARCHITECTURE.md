@@ -274,7 +274,7 @@ For files that did not exist before (`existed: false`), rollback deletes the fil
 
 `install_hooks()`:
 1. Reads or creates `~/.claude/settings.json`.
-2. Inserts Claude hook entries for PreToolUse, PostToolUse, and SessionStart with `--client claude` and a 5-second timeout.
+2. Inserts Claude hook entries for PreToolUse, PostToolUse, and SessionStart with `--client claude` and a 60-second timeout (see the hook protocol section above for why the budget covers the worst case).
 3. If `~/.codex` exists, merges equivalent `--client codex` entries into `~/.codex/hooks.json` and tells the user to review them with `/hooks`.
 4. Injects Railguard instructions into `~/.claude/CLAUDE.md` using marker comments (`<!-- railguard:start -->` / `<!-- railguard:end -->`). This teaches the LLM about rollback commands and blocked operations. If the marker section already exists, it is replaced in-place.
 
