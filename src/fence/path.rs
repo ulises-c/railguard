@@ -193,8 +193,97 @@ pub fn extract_file_paths(tool_name: &str, tool_input: &serde_json::Value) -> Ve
             };
             extract_path_from_command(cmd).into_iter().collect()
         }
-        _ => vec![],
+        // Unrecognized tool — most importantly MCP tools, which Codex and Claude
+        // Code both surface as `mcp__server__tool` and route through PreToolUse.
+        // Returning nothing here used to skip the fence entirely, so a
+        // filesystem-capable MCP server could write a denied path unchecked.
+        _ => extract_paths_from_unknown_tool(tool_input),
     }
+}
+
+/// Keys whose string values name a filesystem path across common MCP and local
+/// function tools. Matched case-insensitively against the whole key, plus a
+/// suffix match so `source_path` / `dest_file` are caught without enumerating
+/// every vendor's spelling.
+const PATH_KEYS: &[&str] = &[
+    "path",
+    "file",
+    "file_path",
+    "filepath",
+    "filename",
+    "file_name",
+    "dir",
+    "directory",
+    "folder",
+    "target",
+    "target_file",
+    "destination",
+    "dest",
+    "source",
+    "src",
+    "output",
+    "output_path",
+    "input_path",
+    "notebook_path",
+    "edit_file_path",
+    // Plurals: MCP servers that accept batches name them this way.
+    "paths",
+    "files",
+    "file_paths",
+    "filenames",
+    "directories",
+    "targets",
+    "sources",
+];
+
+fn is_path_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    PATH_KEYS.contains(&key.as_str())
+        || PATH_KEYS
+            .iter()
+            .any(|candidate| key.ends_with(&format!("_{}", candidate)))
+}
+
+/// Best-effort path harvest from an arbitrary tool input. Walks the whole JSON
+/// value so nested argument objects and arrays of paths are covered.
+///
+/// Deliberately conservative in what it *treats* as a path (absolute, `~`, or
+/// `$HOME`-rooted strings only) but exhaustive in where it looks. A value that
+/// is merely project-relative resolves inside the project and passes the fence
+/// anyway, so skipping those costs no enforcement while avoiding prompts on
+/// ordinary non-path strings.
+fn extract_paths_from_unknown_tool(tool_input: &serde_json::Value) -> Vec<String> {
+    let mut found = Vec::new();
+    harvest_paths(tool_input, false, &mut found);
+    found
+}
+
+fn harvest_paths(value: &serde_json::Value, under_path_key: bool, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s)
+            if under_path_key && looks_like_path(s) && !out.iter().any(|seen| seen == s) =>
+        {
+            out.push(s.clone());
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                harvest_paths(item, under_path_key, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, val) in map {
+                harvest_paths(val, under_path_key || is_path_key(key), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Only rooted paths count. A bare `notes.txt` cannot escape the project once
+/// resolved against cwd, so the fence has nothing to say about it.
+fn looks_like_path(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with('/') || value.starts_with("~/") || value == "~" || value.starts_with("$HOME")
 }
 
 fn extract_paths_from_patch(patch: &str) -> Vec<String> {
@@ -442,6 +531,39 @@ mod tests {
             extract_file_path("Read", &input),
             Some("/etc/passwd".to_string())
         );
+    }
+
+    #[test]
+    fn mcp_tool_paths_reach_the_fence() {
+        // Regression: unrecognized tools used to return no paths at all, so a
+        // filesystem-capable MCP server could write a denied path unchecked.
+        let input = serde_json::json!({
+            "path": "~/.ssh/authorized_keys",
+            "content": "ssh-rsa AAAA"
+        });
+        assert_eq!(
+            extract_file_paths("mcp__filesystem__write_file", &input),
+            vec!["~/.ssh/authorized_keys"]
+        );
+    }
+
+    #[test]
+    fn mcp_tool_paths_are_found_when_nested_or_listed() {
+        let input = serde_json::json!({
+            "args": { "target_file": "/etc/hosts" },
+            "extra_paths": ["~/.aws/credentials", "relative/notes.txt"]
+        });
+        let paths = extract_file_paths("mcp__server__tool", &input);
+        assert!(paths.contains(&"/etc/hosts".to_string()));
+        assert!(paths.contains(&"~/.aws/credentials".to_string()));
+        // Project-relative values resolve inside the project and need no fence entry.
+        assert!(!paths.contains(&"relative/notes.txt".to_string()));
+    }
+
+    #[test]
+    fn unknown_tool_non_path_strings_do_not_become_paths() {
+        let input = serde_json::json!({"query": "SELECT 1", "limit": 10});
+        assert!(extract_file_paths("mcp__db__query", &input).is_empty());
     }
 
     #[test]

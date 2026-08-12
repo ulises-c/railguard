@@ -338,6 +338,63 @@ fn fence_write_to_ssh_keys() {
     );
 }
 
+/// An MCP server with filesystem access is a tool call like any other: Codex and
+/// Claude Code both route `mcp__server__tool` through PreToolUse. Path extraction
+/// once recognized only Bash/Write/Edit/Read/apply_patch and returned nothing for
+/// everything else, so the fence loop never ran and a write to a denied path was
+/// reported back as "no opinion" — i.e. allowed.
+#[test]
+fn fence_blocks_mcp_tool_write_to_ssh_keys() {
+    let dir = create_policy_dir(
+        "version: 1\nblocklist: []\nfence:\n  enabled: true\n  denied_paths:\n    - \"~/.ssh\"",
+    );
+    let home = dirs::home_dir().unwrap();
+    let ssh_path = format!("{}/.ssh/authorized_keys", home.display());
+    let input = serde_json::json!({
+        "session_id": unique_session_id(),
+        "cwd": dir.path().to_str().unwrap(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__filesystem__write_file",
+        "tool_input": { "path": ssh_path, "content": "ssh-rsa AAAA attacker" },
+        "tool_use_id": "test-mcp-fence"
+    })
+    .to_string();
+
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_contains_deny(&stdout),
+        "an MCP tool writing to ~/.ssh must be denied, got: {}",
+        stdout
+    );
+}
+
+/// Same bypass, one level of nesting down — batch arguments and nested option
+/// objects must not hide a denied path from the fence.
+#[test]
+fn fence_blocks_mcp_tool_write_nested_in_arguments() {
+    let dir = create_policy_dir(
+        "version: 1\nblocklist: []\nfence:\n  enabled: true\n  denied_paths:\n    - \"~/.aws\"",
+    );
+    let home = dirs::home_dir().unwrap();
+    let aws_path = format!("{}/.aws/credentials", home.display());
+    let input = serde_json::json!({
+        "session_id": unique_session_id(),
+        "cwd": dir.path().to_str().unwrap(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__files__batch_edit",
+        "tool_input": { "options": { "targets": [aws_path] } },
+        "tool_use_id": "test-mcp-fence-nested"
+    })
+    .to_string();
+
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_contains_deny(&stdout),
+        "a nested MCP path argument must still reach the fence, got: {}",
+        stdout
+    );
+}
+
 #[test]
 fn fence_read_etc_passwd() {
     let dir = create_policy_dir(
