@@ -1238,6 +1238,27 @@ fn brace_home_form_is_fenced() {
     );
 }
 
+/// Bash re-evaluation ran only when the native decision was Allow, so a
+/// tool-specific *approve* rule kept its Approve and never consulted the Bash
+/// blocklist — downgrading an unconditional block into a human-approvable prompt.
+#[test]
+fn tool_specific_approve_cannot_mask_a_bash_block() {
+    let dir = create_policy_dir(
+        "version: 1\nblocklist:\n  - name: mcp-shell-approve\n    tool: mcp__shell__run\n    pattern: \"terraform\"\n    action: approve\n    message: \"MCP shell needs approval\"\n",
+    );
+    let input = make_mcp_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "mcp__shell__run",
+        serde_json::json!({ "command": "terraform destroy -auto-approve" }),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_contains_deny(&stdout),
+        "an approve rule must not mask the built-in Bash block, got: {stdout}"
+    );
+}
+
 /// Snapshot manifests recorded whatever string the tool supplied. A relative
 /// path from a nested cwd therefore resolved against the *rollback caller's*
 /// cwd, restoring over — or, for an entry marked as newly created, deleting —

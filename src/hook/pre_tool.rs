@@ -2,6 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::block::evasion;
+use crate::block::matcher::restrictiveness;
 use crate::fence::path::{absolutize_from, check_path_from, extract_file_paths, PathCheck};
 use crate::memory::guard as memory_guard;
 use crate::policy::engine::evaluate;
@@ -519,13 +520,22 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
     // arriving under some other tool name matched nothing. Re-evaluate the
     // extracted command as if it were Bash and keep the stricter of the two —
     // `railguard uninstall` must not become allowed by being wrapped in an MCP
-    // tool call. Only escalates: a rule that already blocked still blocks.
-    if runs_shell_command && tool_name != "Bash" && matches!(decision, Decision::Allow) {
-        decision = evaluate(
+    // tool call.
+    //
+    // Re-evaluating only when the first decision was Allow broke that promise:
+    // a tool-specific *approve* rule matching a call that carries `terraform
+    // destroy` kept its Approve and never consulted the Bash blocklist,
+    // downgrading an unconditional block into something a human can wave
+    // through. Compare both and keep the most restrictive.
+    if runs_shell_command && tool_name != "Bash" {
+        let as_bash = evaluate(
             policy,
             "Bash",
             &serde_json::json!({ "command": command.clone() }),
         );
+        if restrictiveness(&as_bash) > restrictiveness(&decision) {
+            decision = as_bash;
+        }
     }
 
     match &decision {
