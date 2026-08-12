@@ -1,30 +1,36 @@
 # Default Rules & Configuration
 
-Railguard ships with sensible defaults. Destructive commands require your approval. Evasion attempts are hard-blocked. Everything else flows through instantly.
+Railguard blocks catastrophic, remote, and data-destructive operations. Local pruning that is useful but difficult to undo requires your approval. Evasion attempts are hard-blocked. Everything else flows through instantly.
 
 ## Default rules
 
-### Destructive commands (approve — you decide)
+### Local pruning (approve - you decide)
 
 | Rule | What it catches | Why |
 |------|----------------|-----|
-| `terraform-destroy` | `terraform destroy`, `apply -auto-approve` | 1.9M row deletion incident |
-| `rm-rf-critical` | `rm -rf /`, `~/`, `$HOME` | Home directory wipes |
-| `sql-drop` | `DROP TABLE`, `DATABASE`, `SCHEMA` | Production database loss |
-| `git-force-push` | `git push --force` | Overwrites remote history |
-| `git-reset-hard` | `git reset --hard` | Destroys uncommitted work |
+| `rm-rf-home-descendant` | `rm -rf /home/user/repo`, `rm -rf ~/build` | Broad local deletion |
 | `git-clean-force` | `git clean -f` | Removes untracked files |
-| `drizzle-force` | `drizzle-kit push --force` | 60-table drop incident |
-| `k8s-delete-ns` | `kubectl delete namespace` | Namespace deletion |
-| `aws-s3-rm-recursive` | `aws s3 rm --recursive` | S3 data loss |
+| `git-worktree-remove-force` | `git worktree remove --force` | Discards a dirty worktree |
 | `docker-system-prune` | `docker system prune -a` | Removes all images |
-| `chmod-777-recursive` | `chmod -R 777 /` | Security disaster |
+| `docker-volume-prune` | `docker volume prune` | Removes local volumes and data |
+| `docker-builder-prune-all` | `docker builder/buildx prune --all` | Removes the broad build cache |
 | `npm-publish` | `npm publish` | Accidental publishes |
 
-### Hard blocks (never legitimate from an agent)
+`git clean` dry runs, `git worktree prune`, non-force worktree removal, and ordinary relative cleanup such as `rm -rf target` remain allowed.
+
+### Hard blocks
 
 | Rule | What it catches |
 |------|----------------|
+| `terraform-destroy` | `terraform destroy`, `apply -auto-approve` |
+| `rm-rf-critical` | Exact filesystem roots: `/`, `/home`, `~`, `$HOME`, `/home/user` |
+| `sql-drop` | `DROP TABLE`, `DATABASE`, `SCHEMA`, `TRUNCATE TABLE` |
+| `git-force-push` | `git push --force` |
+| `git-reset-hard` | `git reset --hard` |
+| `drizzle-force` | `drizzle-kit push --force` |
+| `k8s-delete-namespace` | `kubectl delete namespace` |
+| `aws-s3-rm-recursive` | `aws s3 rm --recursive` |
+| `chmod-777-recursive` | `chmod -R 777 /` |
 | `disk-format` | `mkfs`, `dd of=/dev/` |
 | `network-curl-pipe-sh` | `curl \| sh` / `curl \| bash` |
 | `network-nc` | `nc` / `netcat` / `ncat` |
@@ -59,12 +65,12 @@ Railguard ships with sensible defaults. Destructive commands require your approv
 Agents have been [documented trying to bypass safety rules](https://github.com/anthropics/claude-code/issues/29691). Railguard normalizes commands before matching:
 
 ```
-Direct:     terraform destroy                           → ⚠️  asks you
+Direct:     terraform destroy                           → ⛔ blocked
 Base64:     echo dGVycmFmb3Jt... | base64 -d | sh      → ⛔ blocked
 Double b64: echo ZEdW... | base64 -d | base64 -d | sh  → ⛔ blocked + SESSION KILLED
-Variable:   CMD="terraform destroy"; $CMD               → expanded   → ⚠️  asks you
-Shell wrap: sh -c "terraform destroy"                   → unwrapped  → ⚠️  asks you
-Eval:       eval "ter""raform destroy"                  → joined     → ⚠️  asks you
+Variable:   CMD="terraform destroy"; $CMD               → expanded   → ⛔ blocked
+Shell wrap: sh -c "terraform destroy"                   → unwrapped  → ⛔ blocked
+Eval:       eval "ter""raform destroy"                  → joined     → ⛔ blocked
 Hex:        $'\x74\x65\x72\x72...'                      → decoded    → ⛔ blocked
 Rev pipe:   rev <<< 'yortsed mrofarret' | sh            → shape      → ⛔ SESSION KILLED
 ROT13:      tr 'a-z' 'n-za-m' <<< '...' | sh           → shape      → ⛔ SESSION KILLED

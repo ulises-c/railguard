@@ -1,28 +1,50 @@
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 
 use crate::memory::{classifier, conflict, provenance};
 use crate::types::{MemoryClassification, MemoryConfig, MemoryDecision};
 
-/// Pattern to identify Claude Code memory paths.
-/// Memory files live under ~/.claude/projects/*/memory/
-const MEMORY_PATH_PATTERN: &str = ".claude/projects/";
-const MEMORY_DIR_SEGMENT: &str = "/memory/";
 const MEMORY_INDEX: &str = "MEMORY.md";
+static MEMORY_DELETE_PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+    [
+        r"\brm\s+",
+        r"\brmdir\s+",
+        r"\bunlink\s+",
+        r"\bmv\s+",
+        r"\bfind\b.*\s-(delete|exec|execdir|ok|okdir)\b",
+        r"\btrash\s+",
+        r"\bgio\s+trash\s+",
+    ]
+    .into_iter()
+    .map(|pattern| regex::Regex::new(pattern).expect("valid memory deletion pattern"))
+    .collect()
+});
 
 /// Check if a file path is a Claude Code memory path.
 pub fn is_memory_path(file_path: &str) -> bool {
-    // Expand ~ to home dir for matching
-    let expanded = if file_path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            format!("{}{}", home.display(), &file_path[1..])
-        } else {
-            file_path.to_string()
-        }
-    } else {
-        file_path.to_string()
-    };
+    let expanded = expand_home(file_path);
+    let components: Vec<_> = expanded
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect();
 
-    expanded.contains(MEMORY_PATH_PATTERN) && expanded.contains(MEMORY_DIR_SEGMENT)
+    components
+        .windows(4)
+        .any(|parts| parts[0] == ".claude" && parts[1] == "projects" && parts[3] == "memory")
+}
+
+/// The two container roots whose removal would erase all Claude state or all
+/// project memories at once. Individual project memory directories are not
+/// container roots and go through the approval-plus-snapshot path instead.
+pub fn is_memory_container_root(file_path: &str) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let expanded = expand_home(file_path);
+    expanded == home.join(".claude") || expanded == home.join(".claude/projects")
 }
 
 /// Check a memory write operation and decide whether to allow, block, or ask.
@@ -56,12 +78,13 @@ pub fn check_memory_write(
         return MemoryDecision::Allow;
     }
 
-    // Check for Bash rm commands targeting memory files
+    // Deleting or moving a specific memory is permitted only after approval.
+    // The hook snapshots existing affected files before it emits the prompt.
     if tool_name == "Bash" {
         if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
             if is_memory_delete_command(cmd) {
-                return MemoryDecision::Block(
-                    "Memory Safety: Agents cannot delete memory files. Memory is append-only."
+                return MemoryDecision::Approve(
+                    "Memory Safety: delete or move of memory requires approval after a snapshot."
                         .to_string(),
                 );
             }
@@ -223,17 +246,86 @@ fn extract_content(tool_name: &str, tool_input: &serde_json::Value) -> Option<St
     }
 }
 
-/// Check if a bash command is trying to delete memory files.
-fn is_memory_delete_command(cmd: &str) -> bool {
-    let delete_patterns = [r"\brm\s+", r"\bunlink\s+", r"\bmv\s+.*\s+/dev/null"];
-    for pattern in &delete_patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            if re.is_match(cmd) {
-                return true;
+/// Check if a bash command is trying to delete or move memory files.
+pub fn is_memory_delete_command(cmd: &str) -> bool {
+    MEMORY_DELETE_PATTERNS
+        .iter()
+        .any(|pattern| pattern.is_match(cmd))
+}
+
+/// List existing files that must be snapshotted before an approved memory
+/// deletion. Directories are walked without following directory symlinks.
+pub fn files_to_snapshot(file_path: &str) -> Result<Vec<String>, String> {
+    let requested = expand_home(file_path);
+    // Snapshot the whole containing memory directory. Command extraction
+    // intentionally truncates quoted paths at spaces to avoid treating prose
+    // as operands; directory-level capture still guarantees recovery for the
+    // actual target and remains cheap because memory directories are small.
+    let root = if requested.exists() {
+        requested
+    } else {
+        requested
+            .ancestors()
+            .find(|path| {
+                path.file_name().and_then(|name| name.to_str()) == Some("memory")
+                    && is_memory_path(&path.display().to_string())
+            })
+            .map(Path::to_path_buf)
+            .unwrap_or(requested)
+    };
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let metadata = std::fs::symlink_metadata(&root)
+        .map_err(|error| format!("cannot inspect '{}': {error}", root.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "cannot safely snapshot symbolic link '{}'",
+            root.display()
+        ));
+    }
+    if metadata.is_file() {
+        return Ok(vec![root.display().to_string()]);
+    }
+
+    let mut files = Vec::new();
+    let mut pending = vec![root];
+    while let Some(directory) = pending.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("cannot read '{}': {error}", directory.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "cannot inspect files under '{}': {error}",
+                    directory.display()
+                )
+            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("cannot inspect '{}': {error}", entry.path().display()))?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path().display().to_string());
+            } else if file_type.is_symlink() {
+                return Err(format!(
+                    "cannot safely snapshot symbolic link '{}'",
+                    entry.path().display()
+                ));
             }
         }
     }
-    false
+    files.sort();
+    Ok(files)
+}
+
+fn expand_home(file_path: &str) -> PathBuf {
+    if let Some(rest) = file_path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(file_path)
 }
 
 /// Extract the memory directory from a memory file path.
@@ -372,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn test_block_bash_delete() {
+    fn test_approve_bash_delete() {
         let config = MemoryConfig::default();
         let cwd = Path::new("/tmp");
         let tool_input = serde_json::json!({
@@ -387,7 +479,7 @@ mod tests {
             "s1",
             cwd,
         );
-        assert!(matches!(decision, MemoryDecision::Block(_)));
+        assert!(matches!(decision, MemoryDecision::Approve(_)));
     }
 
     #[test]
@@ -411,6 +503,20 @@ mod tests {
             cwd,
         );
         assert!(matches!(decision, MemoryDecision::Allow));
+    }
+
+    #[test]
+    fn snapshot_falls_back_to_memory_directory_for_truncated_quoted_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join(".claude/projects/test/memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        let memory_file = memory_dir.join("stale note.md");
+        std::fs::write(&memory_file, "stale").unwrap();
+
+        let extracted_prefix = memory_dir.join("stale");
+        let files = files_to_snapshot(extracted_prefix.to_str().unwrap()).unwrap();
+
+        assert_eq!(files, vec![memory_file.display().to_string()]);
     }
 
     #[test]

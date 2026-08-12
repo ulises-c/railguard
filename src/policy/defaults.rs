@@ -3,10 +3,10 @@ use crate::types::Rule;
 /// Default blocklist rules. One set for everyone, fully customizable via railguard.yaml.
 ///
 /// Philosophy:
-/// - Destructive commands → block (agent finds another way, you stay hands-off)
-/// - Sensitive operations → approve (agent pauses, you say yes or no)
-/// - Evasion attempts → block (never legitimate)
-/// - Self-protection → block (agent can't disable its own guardrails)
+/// - Catastrophic, remote, and data-destructive commands are blocked
+/// - Reversible or local pruning pauses for approval
+/// - Evasion attempts are blocked
+/// - Self-protection is blocked
 pub fn default_blocklist() -> Vec<Rule> {
     vec![
         // ── Destructive commands — block (agent gets denied, finds safer approach) ──
@@ -20,9 +20,16 @@ pub fn default_blocklist() -> Vec<Rule> {
         Rule {
             name: "rm-rf-critical".to_string(),
             tool: "Bash".to_string(),
-            pattern: r"rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|--force\s+).*(/\s*$|/\*|~/|\$HOME|/home)".to_string(),
+            pattern: r"(?m)(^|[;&|]\s*)rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\s+-f|-f\s+-[rR]|--recursive\s+--force|--force\s+--recursive)\s+(--\s+)?([^;&|\n]*\s)?(/|/\*|~/?|\$HOME/?|\$\{HOME\}/?|/home/?|/home/[^/\s]+/?)(\s|$|[;&|])".to_string(),
             action: "block".to_string(),
-            message: Some("Blocked: recursive force delete of critical path".to_string()),
+            message: Some("Blocked: recursive force delete of a filesystem or home root".to_string()),
+        },
+        Rule {
+            name: "rm-rf-home-descendant".to_string(),
+            tool: "Bash".to_string(),
+            pattern: r"rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\s+-f|-f\s+-[rR]|--recursive\s+--force|--force\s+--recursive)\s+(--\s+)?(~|\$HOME|\$\{HOME\}|/home/[^/\s]+)(/[^\s;&|]+)+".to_string(),
+            action: "approve".to_string(),
+            message: Some("Recursive force delete under a home directory requires approval".to_string()),
         },
         Rule {
             name: "sql-drop".to_string(),
@@ -48,9 +55,16 @@ pub fn default_blocklist() -> Vec<Rule> {
         Rule {
             name: "git-clean-force".to_string(),
             tool: "Bash".to_string(),
-            pattern: r"git\s+clean\s+(-[a-zA-Z]*f|--force)".to_string(),
-            action: "block".to_string(),
-            message: Some("Blocked: git clean -f removes untracked files permanently".to_string()),
+            pattern: r"git\s+clean\s+([^\s]+\s+)*(-[a-zA-Z]*f|--force)".to_string(),
+            action: "approve".to_string(),
+            message: Some("git clean -f removes untracked files and requires approval".to_string()),
+        },
+        Rule {
+            name: "git-worktree-remove-force".to_string(),
+            tool: "Bash".to_string(),
+            pattern: r"git\s+worktree\s+remove\s+([^\s]+\s+)*(--force|-f)(\s|$)".to_string(),
+            action: "approve".to_string(),
+            message: Some("Force-removing a Git worktree requires approval".to_string()),
         },
         Rule {
             name: "drizzle-force".to_string(),
@@ -84,8 +98,22 @@ pub fn default_blocklist() -> Vec<Rule> {
             name: "docker-system-prune".to_string(),
             tool: "Bash".to_string(),
             pattern: r"docker\s+system\s+prune\s+(-a|--all)".to_string(),
-            action: "block".to_string(),
-            message: Some("Blocked: docker system prune -a removes all images".to_string()),
+            action: "approve".to_string(),
+            message: Some("docker system prune -a removes all unused images and requires approval".to_string()),
+        },
+        Rule {
+            name: "docker-volume-prune".to_string(),
+            tool: "Bash".to_string(),
+            pattern: r"docker\s+volume\s+prune\b".to_string(),
+            action: "approve".to_string(),
+            message: Some("Docker volume pruning can delete local data and requires approval".to_string()),
+        },
+        Rule {
+            name: "docker-builder-prune-all".to_string(),
+            tool: "Bash".to_string(),
+            pattern: r"docker\s+(builder|buildx)\s+prune\s+.*(-a|--all)\b".to_string(),
+            action: "approve".to_string(),
+            message: Some("Broad Docker build-cache pruning requires approval".to_string()),
         },
         Rule {
             name: "chmod-777-recursive".to_string(),
@@ -395,6 +423,25 @@ mod tests {
         for name in &block_rules {
             let rule = rules.iter().find(|r| r.name == *name).unwrap();
             assert_eq!(rule.action, "block", "Rule '{}' should be block", name);
+        }
+    }
+
+    #[test]
+    fn local_pruning_rules_require_approval() {
+        let rules = default_blocklist();
+        for name in [
+            "rm-rf-home-descendant",
+            "git-clean-force",
+            "git-worktree-remove-force",
+            "docker-system-prune",
+            "docker-volume-prune",
+            "docker-builder-prune-all",
+        ] {
+            let rule = rules
+                .iter()
+                .find(|rule| rule.name == name)
+                .unwrap_or_else(|| panic!("missing pruning rule `{name}`"));
+            assert_eq!(rule.action, "approve", "Rule '{name}' should ask");
         }
     }
 

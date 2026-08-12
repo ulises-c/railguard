@@ -272,23 +272,79 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
         }
     }
 
+    // Evaluate hard policy blocks before the path fence. An outside-project
+    // prompt must never downgrade a command that policy says is forbidden.
+    let decision = evaluate(policy, tool_name, &tool_input);
+    if let Decision::Block { rule, message } = &decision {
+        if tool_name == "Bash" && !command.is_empty() {
+            let keywords = extract_keywords(&command);
+            state.record_block(&command, rule, keywords, 0);
+        }
+        let _ = state.save(&state_dir);
+        log_decision(
+            input,
+            policy,
+            tool_name,
+            &tool_input,
+            "block",
+            Some(rule),
+            start,
+        );
+        return PreToolResult {
+            output: HookOutput::deny(&format!("⛔ Railguard BLOCKED: {}", message)),
+            terminate: None,
+        };
+    }
+
     // === MEMORY GUARD (before path fence, since ~/.claude is denied) ===
+
+    if tool_name == "Bash" && memory_guard::is_memory_delete_command(&command) {
+        let paths = evasion::extract_paths_from_command(&command);
+        if paths
+            .iter()
+            .any(|path| memory_guard::is_memory_container_root(path))
+        {
+            let _ = state.save(&state_dir);
+            log_decision(
+                input,
+                policy,
+                tool_name,
+                &tool_input,
+                "block",
+                Some("memory-container-root"),
+                start,
+            );
+            return PreToolResult {
+                output: HookOutput::deny(
+                    "⛔ Railguard: Memory Safety: deleting ~/.claude or ~/.claude/projects is blocked.",
+                ),
+                terminate: None,
+            };
+        }
+    }
 
     if policy.memory.enabled {
         // For Bash commands, check if they touch memory paths
-        let memory_file_path = if tool_name == "Bash" {
+        let memory_file_paths: Vec<String> = if tool_name == "Bash" {
             tool_input
                 .get("command")
                 .and_then(|v| v.as_str())
-                .and_then(|cmd| {
+                .map(|cmd| {
                     let paths = evasion::extract_paths_from_command(cmd);
-                    paths.into_iter().find(|p| memory_guard::is_memory_path(p))
+                    paths
+                        .into_iter()
+                        .filter(|path| memory_guard::is_memory_path(path))
+                        .collect()
                 })
+                .unwrap_or_default()
         } else {
-            extract_file_path(tool_name, &tool_input).filter(|p| memory_guard::is_memory_path(p))
+            extract_file_path(tool_name, &tool_input)
+                .filter(|path| memory_guard::is_memory_path(path))
+                .into_iter()
+                .collect()
         };
 
-        if let Some(ref mem_path) = memory_file_path {
+        if let Some(mem_path) = memory_file_paths.first() {
             let result = memory_guard::check_memory_write(
                 &policy.memory,
                 tool_name,
@@ -355,6 +411,46 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                     };
                 }
                 MemoryDecision::Approve(reason) => {
+                    if tool_name == "Bash" && memory_guard::is_memory_delete_command(&command) {
+                        let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
+                        let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
+                        for path in &memory_file_paths {
+                            let files = match memory_guard::files_to_snapshot(path) {
+                                Ok(files) => files,
+                                Err(error) => {
+                                    return memory_snapshot_failure(
+                                        input,
+                                        policy,
+                                        tool_name,
+                                        &tool_input,
+                                        &mut state,
+                                        &state_dir,
+                                        start,
+                                        &error,
+                                    );
+                                }
+                            };
+                            for file in files {
+                                if let Err(error) = capture_snapshot(
+                                    &snap_dir,
+                                    &input.session_id,
+                                    tool_use_id,
+                                    &file,
+                                ) {
+                                    return memory_snapshot_failure(
+                                        input,
+                                        policy,
+                                        tool_name,
+                                        &tool_input,
+                                        &mut state,
+                                        &state_dir,
+                                        start,
+                                        &error,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     let _ = state.save(&state_dir);
                     log_decision(
                         input,
@@ -371,7 +467,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                              \n\
                              {}\n\
                              \n\
-                             Railguard's memory guard requires approval for behavioral memory writes.",
+                             Railguard's memory guard requires approval for this memory change.",
                             reason
                         )),
                         terminate: None,
@@ -408,8 +504,9 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         };
                     }
                     PathCheck::OutsideProject(reason) => {
-                        if is_read_only_command(cmd) {
-                            // Read-only commands outside project are fine
+                        if is_read_only_command(cmd) || is_safe_worktree_removal(cmd) {
+                            // Read-only commands and Git-safe worktree removal
+                            // may operate outside the project without a prompt.
                         } else {
                             let _ = state.save(&state_dir);
                             log_decision(
@@ -488,8 +585,6 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
     }
 
     // === POLICY EVALUATION (allowlist → blocklist → approve) ===
-
-    let decision = evaluate(policy, tool_name, &tool_input);
 
     match &decision {
         Decision::Allow => {
@@ -727,8 +822,82 @@ fn is_read_only_command(cmd: &str) -> bool {
         .filter(|seg| !seg.is_empty())
         .all(|seg| {
             let tok = seg.split(char::is_whitespace).next().unwrap_or("");
-            matches!(tok, "cd" | "pushd" | "popd") || READ_ONLY_COMMANDS.contains(&tok)
+            matches!(tok, "cd" | "pushd" | "popd")
+                || (READ_ONLY_COMMANDS.contains(&tok) && !has_write_mode(tok, seg))
         })
+}
+
+fn has_write_mode(tool: &str, segment: &str) -> bool {
+    let args: Vec<_> = segment.split_whitespace().skip(1).collect();
+    match tool {
+        "find" => args
+            .iter()
+            .any(|arg| matches!(*arg, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")),
+        "sed" => args.iter().any(|arg| {
+            (arg.starts_with("-i") && !arg.starts_with("--"))
+                || *arg == "--in-place"
+                || arg.starts_with("--in-place=")
+        }),
+        "yq" => args.iter().any(|arg| matches!(*arg, "-i" | "--inplace")),
+        "sort" | "uniq" => args.iter().any(|arg| {
+            *arg == "-o"
+                || *arg == "--output"
+                || arg.starts_with("-o")
+                || arg.starts_with("--output=")
+        }),
+        "xxd" => args.iter().any(|arg| matches!(*arg, "-r" | "-revert")),
+        _ => false,
+    }
+}
+
+/// A non-force worktree removal is guarded by Git itself: Git refuses to
+/// remove a dirty worktree. Waive only the outside-project prompt for a single,
+/// unchained command; denied paths and hard policy blocks still run first.
+fn is_safe_worktree_removal(cmd: &str) -> bool {
+    if cmd.contains("$(")
+        || cmd
+            .chars()
+            .any(|character| matches!(character, ';' | '|' | '&' | '>' | '<' | '`' | '\n'))
+    {
+        return false;
+    }
+
+    let words: Vec<_> = cmd.split_whitespace().collect();
+    words.len() >= 4
+        && words[..3] == ["git", "worktree", "remove"]
+        && !words[3..].iter().any(|word| {
+            *word == "--force"
+                || (word.starts_with('-') && !word.starts_with("--") && word[1..].contains('f'))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn memory_snapshot_failure(
+    input: &HookInput,
+    policy: &Policy,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    state: &mut SessionState,
+    state_dir: &Path,
+    start: Instant,
+    error: &str,
+) -> PreToolResult {
+    let _ = state.save(state_dir);
+    log_decision(
+        input,
+        policy,
+        tool_name,
+        tool_input,
+        "block",
+        Some("memory-snapshot"),
+        start,
+    );
+    PreToolResult {
+        output: HookOutput::deny(&format!(
+            "⛔ Railguard: Memory Safety: deletion blocked because the pre-approval snapshot failed: {error}"
+        )),
+        terminate: None,
+    }
 }
 
 fn summarize_input(tool_name: &str, tool_input: &serde_json::Value) -> String {
