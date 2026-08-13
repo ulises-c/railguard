@@ -141,7 +141,7 @@ fn guard_allows_factual_write() {
 }
 
 #[test]
-fn guard_blocks_bash_rm_of_memory() {
+fn guard_asks_before_bash_rm_of_memory() {
     let config = MemoryConfig::default();
     let cwd = Path::new("/tmp");
     let tool_input = serde_json::json!({
@@ -157,9 +157,9 @@ fn guard_blocks_bash_rm_of_memory() {
         cwd,
     );
 
-    assert!(matches!(decision, MemoryDecision::Block(_)));
-    if let MemoryDecision::Block(reason) = decision {
-        assert!(reason.contains("delete") || reason.contains("append-only"));
+    assert!(matches!(decision, MemoryDecision::Approve(_)));
+    if let MemoryDecision::Approve(reason) = decision {
+        assert!(reason.contains("delete"));
     }
 }
 
@@ -385,6 +385,9 @@ fn memory_path_detection() {
     assert!(guard::is_memory_path(
         "~/.claude/projects/-Users-test-myproject/memory/feedback_testing.md"
     ));
+    assert!(guard::is_memory_path(
+        "~/.claude/projects/-Users-test-myproject/memory"
+    ));
 
     // Not memory paths
     assert!(!guard::is_memory_path("/tmp/random.md"));
@@ -447,24 +450,30 @@ fn attack_exfiltrate_secrets_via_memory() {
 }
 
 #[test]
-fn attack_delete_memory_via_bash() {
-    // Agent tries to delete memory files via bash
+fn deletion_commands_require_approval_for_memory() {
     let config = MemoryConfig::default();
     let cwd = Path::new("/tmp");
-    let tool_input = serde_json::json!({
-        "command": "rm -rf ~/.claude/projects/foo/memory/"
-    });
+    for command in [
+        "rm -rf ~/.claude/projects/foo/memory",
+        "find ~/.claude/projects/foo/memory -depth -delete",
+        "unlink ~/.claude/projects/foo/memory/old.md",
+        "rmdir ~/.claude/projects/foo/memory",
+    ] {
+        let tool_input = serde_json::json!({ "command": command });
+        let decision = guard::check_memory_write(
+            &config,
+            "Bash",
+            "~/.claude/projects/foo/memory",
+            &tool_input,
+            "session-1",
+            cwd,
+        );
 
-    let decision = guard::check_memory_write(
-        &config,
-        "Bash",
-        "~/.claude/projects/foo/memory/",
-        &tool_input,
-        "session-1",
-        cwd,
-    );
-
-    assert!(matches!(decision, MemoryDecision::Block(_)));
+        assert!(
+            matches!(decision, MemoryDecision::Approve(_)),
+            "`{command}` should require approval, got {decision:?}"
+        );
+    }
 }
 
 #[test]

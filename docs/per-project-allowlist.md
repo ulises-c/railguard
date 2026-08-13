@@ -40,15 +40,16 @@ entries are appended to the effective policy's allowed list. Resolution order:
 
 1. `load_policy_or_defaults(cwd)` resolves the base policy as before
    (`find_policy_file` walks up; falls back to built-in defaults).
-2. `apply_local_overrides(cwd)` walks up for `.railguard.local.yaml` and, if the
-   base policy opted in, appends its `fence.allowed_paths` (de-duplicated).
+2. `apply_local_overrides(cwd)` walks up for `.railguard.local.yaml` and, unless
+   the base policy opted out, appends its `fence.allowed_paths` (de-duplicated).
 
 The override file name is distinct from the `.railguard.yaml` full-policy file
 that `find_policy_file` already recognizes, so the two never collide.
 
 ## Usage
 
-1. Opt in once, in your base (global) policy — e.g. `~/.railguard.yaml`:
+1. Local overrides are enabled by default. To state that explicitly in your
+   base (global) policy, for example `~/.railguard.yaml`:
 
    ```yaml
    fence:
@@ -67,8 +68,8 @@ that `find_policy_file` already recognizes, so the two never collide.
 3. The override is per-machine/per-checkout state — add it to the project's
    `.gitignore` unless you want to commit a shared exception.
 
-If `allow_local_overrides` is not set in the base policy, `.railguard.local.yaml`
-is ignored entirely.
+If `allow_local_overrides` is not set, it defaults to `true`. Set it to `false`
+in the trusted base policy to ignore `.railguard.local.yaml` files.
 
 ## Security model / reasoning
 
@@ -78,11 +79,10 @@ designed with three guarantees:
 
 - **Additive only.** The override can add `allowed_paths` and nothing else. It
   cannot remove or weaken `denied_paths`, change rules, or disable the fence.
-- **Opt-in at the trusted layer.** Overrides are honored only when the base
-  policy — the human-controlled global file — sets `allow_local_overrides: true`.
-  Without that, a cloned or hostile repo cannot ship a `.railguard.local.yaml`
-  that self-grants filesystem access. This is the key control: the *project*
-  cannot opt itself in.
+- **Trusted-layer opt-out.** Overrides are honored by default. The
+  human-controlled base policy can set `allow_local_overrides: false` when
+  repositories must not widen access. Project overrides remain additive-only
+  and cannot weaken denied paths.
 - **Denies still win.** `check_path` evaluates `denied_paths` before
   `allowed_paths`, so even an opted-in override that lists `~/.ssh` or `/etc`
   cannot expose them — the deny fires first. (Covered by
@@ -92,12 +92,11 @@ A malformed `.railguard.local.yaml` is warned about and ignored, never fatal.
 
 ## Implementation
 
-- `src/types.rs` — `FenceConfig.allow_local_overrides: bool` (`#[serde(default)]`,
-  defaults to `false`).
+- `src/types.rs` - `FenceConfig.allow_local_overrides: bool` defaults to `true`.
 - `src/policy/loader.rs` — `find_local_override_file`, `apply_local_overrides`,
   and the `LocalOverride` parse struct (reads only `fence.allowed_paths`).
 - `src/configure.rs` — emits the flag in the generated template for discoverability.
-- Tests: opted-in add, ignored-without-opt-in, and deny-precedence.
+- Tests: enabled-by-default add, explicit opt-out, and deny precedence.
 
 ## Contribution workflow
 

@@ -19,9 +19,9 @@ blocklist:
 
   - name: rm-rf-critical
     tool: Bash
-    pattern: "rm\\s+(-[a-zA-Z]*f[a-zA-Z]*\\s+|--force\\s+).*(/\\s*$|/\\*|~/|\\$HOME|/home)"
+    pattern: "(?m)(^|[;&|]\\s*)rm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\\s+-f|-f\\s+-[rR]|--recursive\\s+--force|--force\\s+--recursive)\\s+(--\\s+)?([^;&|\\n]*\\s)?(/|/\\*|~/?|\\$HOME/?|\\$\\{HOME\\}/?|/home/?|/home/[^/\\s]+/?)(\\s|$|[;&|])"
     action: block
-    message: "Blocked: recursive force delete of critical path"
+    message: "Blocked: recursive force delete of a filesystem or home root"
 
   - name: sql-drop
     tool: Bash
