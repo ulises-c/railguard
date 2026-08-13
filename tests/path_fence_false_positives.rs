@@ -195,6 +195,81 @@ fn benign_commands_are_not_path_fenced() {
     );
 }
 
+/// Issue #32, unmasked. The BENIGN corpus above already carries sed/awk regex
+/// addresses, but every one of those pipelines is read-only end to end, so
+/// `is_read_only_command` waives the prompt and the extraction bug stays
+/// hidden. Pairing the same regexes with a non-read-only stage (`cargo test`)
+/// removes the waiver, so these fail on the extraction itself.
+const REGEX_OPERAND_BESIDE_WRITE_CAPABLE: &[(&str, &str)] = &[
+    (
+        "awk regex",
+        r#"cargo test 2>&1 | awk '/test result/ {print $4}'"#,
+    ),
+    ("sed address", r#"cargo test | sed -n '/1000/p'"#),
+    ("sed range", r#"cargo test | sed -n '/1000/,$p'"#),
+    ("grep literal", r#"cargo test | grep -o '/1000'"#),
+    ("rg pattern", r#"cargo build | rg '/etc/passwd'"#),
+];
+
+#[test]
+fn regex_operands_beside_a_write_capable_stage_are_not_fenced() {
+    let dir = create_policy_dir("version: 1\nblocklist: []\n");
+    let cwd = dir.path().to_str().unwrap();
+    let mut failures = Vec::new();
+
+    for (label, cmd) in REGEX_OPERAND_BESIDE_WRITE_CAPABLE {
+        let stdout = simulate_hook(&railguard_binary(), &bash_input(cwd, cmd));
+        if path_fenced(&stdout) {
+            failures.push(format!("  [{label}] `{cmd}`"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} regex operand(s) were fenced as paths:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The flip side: the same tools naming a real file outside the project must
+/// still be fenced. Only the program slot is exempt, never a path operand.
+const REGEX_TOOL_REAL_PATH_OUTSIDE: &[(&str, &str)] = &[
+    (
+        "sed file operand outside",
+        r#"cargo run | sed -n '/x/p' ~/outside/f.txt"#,
+    ),
+    (
+        "awk file operand outside",
+        r#"cargo run | awk '/x/{print}' ~/outside/f.txt"#,
+    ),
+    (
+        "grep -f outside",
+        r#"cargo run | grep -f ~/outside/patterns.txt data.txt"#,
+    ),
+];
+
+#[test]
+fn regex_tools_naming_real_outside_paths_are_still_fenced() {
+    let dir = create_policy_dir("version: 1\nblocklist: []\n");
+    let cwd = dir.path().to_str().unwrap();
+    let mut leaks = Vec::new();
+
+    for (label, cmd) in REGEX_TOOL_REAL_PATH_OUTSIDE {
+        let stdout = simulate_hook(&railguard_binary(), &bash_input(cwd, cmd));
+        if !path_fenced(&stdout) {
+            leaks.push(format!("  [{label}] `{cmd}`"));
+        }
+    }
+
+    assert!(
+        leaks.is_empty(),
+        "{} outside path(s) slipped past the fence:\n{}",
+        leaks.len(),
+        leaks.join("\n")
+    );
+}
+
 /// The flip side of prompt fatigue: write-capable tools that name a path OUTSIDE
 /// the project must still be fenced. `is_read_only_command` waives the prompt
 /// only for tools that purely read; interpreters, compilers, VCS, package
