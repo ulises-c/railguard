@@ -356,11 +356,23 @@ static STRONG_OBFUSCATION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|
 /// suspicious than in a multi-line heredoc script (issue #18).
 static INLINE_OBFUSCATION_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
     compile_signals(&[
-        r"chr\s*\(",
         r"fromCharCode",
         r"\\x[0-9a-fA-F]{2}",
         // Path assembly via join — '/'.join or "/".join
         r#"['"]/'*\s*\.\s*join\s*\("#,
+    ])
+});
+
+static CHR_SIGNAL: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"chr\s*\(").unwrap());
+static DYNAMIC_DISPATCH_SIGNALS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+    compile_signals(&[
+        r"getattr\s*\(",
+        r"setattr\s*\(",
+        r"__import__\s*\(",
+        r"(?:globals|locals)\s*\(\s*\)\s*\[",
+        r"(?:__dict__|__builtins__)\s*\[",
+        r"\]\s*\(",
     ])
 });
 
@@ -410,12 +422,91 @@ pub fn is_interpreter_obfuscation(cmd: &str) -> bool {
             && (INLINE_OBFUSCATION_SIGNALS
                 .iter()
                 .any(|re| re.is_match(&payload))
-                || EXECUTION_SIGNALS.iter().any(|re| re.is_match(&payload)))
+                || EXECUTION_SIGNALS.iter().any(|re| re.is_match(&payload))
+                || (CHR_SIGNAL.is_match(&payload)
+                    && (pipes_to_shell(cmd)
+                        || DYNAMIC_DISPATCH_SIGNALS
+                            .iter()
+                            .any(|re| re.is_match(&payload)))))
         {
             return true;
         }
     }
     false
+}
+
+fn pipes_to_shell(cmd: &str) -> bool {
+    let parsed = tokenize_shell(cmd);
+    let mut segment: Vec<&ShellToken> = Vec::new();
+    let mut after_pipe = false;
+
+    for token in &parsed.tokens {
+        match token {
+            ShellToken::Op("|") => {
+                if after_pipe && segment_is_shell_destination(&segment) {
+                    return true;
+                }
+                segment.clear();
+                after_pipe = true;
+            }
+            ShellToken::Op(op) if matches!(*op, "&&" | "||" | ";" | "&" | "(" | ")" | "`") => {
+                if after_pipe && segment_is_shell_destination(&segment) {
+                    return true;
+                }
+                segment.clear();
+                after_pipe = false;
+            }
+            _ => segment.push(token),
+        }
+    }
+
+    after_pipe && segment_is_shell_destination(&segment)
+}
+
+fn segment_is_shell_destination(tokens: &[&ShellToken]) -> bool {
+    let words: Vec<&str> = tokens
+        .iter()
+        .filter_map(|token| match token {
+            ShellToken::Word(word) => Some(word.as_str()),
+            _ => None,
+        })
+        .collect();
+    if words.is_empty() {
+        return false;
+    }
+
+    let (eff_idx, split_commands) = resolve_effective_command(&words);
+    if split_commands
+        .iter()
+        .any(|command| pipes_to_shell(&format!("true | {command}")))
+    {
+        return true;
+    }
+    let eff = words
+        .get(eff_idx)
+        .map(|word| command_basename(word))
+        .unwrap_or("");
+    if is_shell(eff) || matches!(eff, "eval" | "source") {
+        return true;
+    }
+    eff == "busybox"
+        && words
+            .iter()
+            .skip(eff_idx + 1)
+            .find(|word| !word.starts_with('-'))
+            .is_some_and(|word| is_shell(command_basename(word)))
+}
+
+/// Shell words with operators separated and quoted data kept as one word.
+pub fn shell_words(cmd: &str) -> Vec<String> {
+    tokenize_shell(cmd)
+        .tokens
+        .into_iter()
+        .filter_map(|token| match token {
+            ShellToken::Word(word) => Some(word),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The executable code payloads an interpreter/shell is invoked with in `cmd`.
@@ -2302,6 +2393,24 @@ mod tests {
         ));
         // Safe: math with + — should NOT trigger
         assert!(!is_interpreter_obfuscation(r#"python3 -c "print(1 + 2)""#));
+        assert!(!is_interpreter_obfuscation(
+            r#"python3 -c "import json; d=json.load(open('/tmp/state.json')); print(d['command'].replace(chr(10), ' '))""#
+        ));
+        assert!(is_interpreter_obfuscation(
+            r#"python3 -c "getattr(__import__(chr(111)+chr(115)), chr(115)+chr(121)+chr(115)+chr(116)+chr(101)+chr(109))(chr(105)+chr(100))""#
+        ));
+        assert!(is_interpreter_obfuscation(
+            r#"python3 -c "import os; os.__dict__[chr(115)+chr(121)+chr(115)+chr(116)+chr(101)+chr(109)]('id')""#
+        ));
+        assert!(is_interpreter_obfuscation(
+            r#"python3 -c "print(chr(114)+chr(109))" | sh"#
+        ));
+        assert!(is_interpreter_obfuscation(
+            r#"python3 -c "print(chr(105)+chr(100))" | /bin/sh"#
+        ));
+        assert!(is_interpreter_obfuscation(
+            r#"python3 -c "print(chr(105)+chr(100))" | dash"#
+        ));
         // Safe: not an interpreter
         assert!(!is_interpreter_obfuscation("echo base64 | sh"));
     }

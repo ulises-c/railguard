@@ -42,11 +42,11 @@ pub fn check_behavioral_evasion(state: &SessionState, cmd: &str) -> Option<Threa
 
     let cmd_lower = cmd.to_lowercase();
     for event in state.recent_denied_blocks() {
-        let matched: Vec<String> = event
-            .keywords
-            .iter()
-            .filter(|kw| cmd_lower.contains(&kw.to_lowercase()))
-            .cloned()
+        let mut seen = std::collections::HashSet::new();
+        let matched: Vec<String> = retry_keywords(&event.command, &event.keywords)
+            .into_iter()
+            .filter(|keyword| seen.insert(keyword.clone()))
+            .filter(|keyword| contains_keyword(&cmd_lower, keyword))
             .collect();
 
         // Need at least 2 keyword matches to trigger (avoid single common words)
@@ -59,6 +59,91 @@ pub fn check_behavioral_evasion(state: &SessionState, cmd: &str) -> Option<Threa
     }
 
     None
+}
+
+fn retry_keywords(command: &str, recorded: &[String]) -> Vec<String> {
+    let mut keywords = extract_keywords(command);
+    let mut seen: std::collections::HashSet<String> = keywords.iter().cloned().collect();
+
+    for keyword in recorded {
+        for word in evasion::shell_words(keyword) {
+            if let Some(normalized) = normalize_keyword(&word) {
+                if seen.insert(normalized.clone()) {
+                    keywords.push(normalized);
+                }
+            }
+        }
+    }
+
+    keywords
+}
+
+fn contains_keyword(cmd: &str, keyword: &str) -> bool {
+    regex::Regex::new(&format!(
+        r"(?:^|[^[:alnum:]_]){}(?:$|[^[:alnum:]_])",
+        regex::escape(keyword)
+    ))
+    .ok()
+    .is_some_and(|re| re.is_match(cmd))
+}
+
+fn normalize_keyword(word: &str) -> Option<String> {
+    let word = word
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+
+    if word.len() < 3 || is_keyword_noise(&word) {
+        None
+    } else {
+        Some(word)
+    }
+}
+
+fn is_keyword_noise(word: &str) -> bool {
+    matches!(
+        word,
+        "sh" | "bash"
+            | "zsh"
+            | "echo"
+            | "eval"
+            | "exec"
+            | "source"
+            | "sudo"
+            | "env"
+            | "export"
+            | "set"
+            | "unset"
+            | "if"
+            | "then"
+            | "else"
+            | "fi"
+            | "for"
+            | "do"
+            | "done"
+            | "while"
+            | "true"
+            | "false"
+            | "test"
+            | "xargs"
+            | "rtk"
+            | "proxy"
+            | "python"
+            | "python3"
+            | "ruby"
+            | "perl"
+            | "node"
+            | "import"
+            | "json"
+            | "print"
+            | "head"
+            | "tail"
+            | "grep"
+            | "sed"
+            | "awk"
+            | "cat"
+            | "try"
+            | "not"
+    )
 }
 
 /// Tier 1: Patterns that are almost never legitimate.
@@ -138,24 +223,16 @@ fn detect_tier2(cmd: &str) -> Option<String> {
 /// Extract meaningful keywords from a command for behavioral tracking.
 /// Filters out common shell tokens and returns actionable words.
 pub fn extract_keywords(cmd: &str) -> Vec<String> {
-    let noise: std::collections::HashSet<&str> = [
-        "|", "&&", "||", ";", ">", ">>", "<", "2>&1", "sh", "bash", "zsh", "echo", "eval", "exec",
-        "source", "sudo", "env", "export", "set", "unset", "if", "then", "else", "fi", "for", "do",
-        "done", "while", "true", "false", "test", "xargs",
-    ]
-    .iter()
-    .copied()
-    .collect();
+    let mut seen = std::collections::HashSet::new();
 
-    cmd.split_whitespace()
-        .filter(|w| !w.starts_with('-'))
-        .filter(|w| !w.starts_with('$'))
-        .filter(|w| !w.starts_with('"'))
-        .filter(|w| !w.starts_with('\''))
-        .filter(|w| !noise.contains(*w))
-        .filter(|w| w.len() >= 3)
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-        .filter(|w| !w.is_empty())
+    evasion::shell_words(cmd)
+        .into_iter()
+        .filter(|word| !word.starts_with('-'))
+        .filter(|word| !word.starts_with('$'))
+        .filter(|word| !word.starts_with('"'))
+        .filter(|word| !word.starts_with('\''))
+        .filter_map(|word| normalize_keyword(&word))
+        .filter(|keyword| seen.insert(keyword.clone()))
         .collect()
 }
 
@@ -211,6 +288,82 @@ mod tests {
         let keywords = extract_keywords("terraform destroy --auto-approve");
         assert!(keywords.contains(&"terraform".to_string()));
         assert!(keywords.contains(&"destroy".to_string()));
+    }
+
+    #[test]
+    fn extract_keywords_drops_wrappers_short_tokens_and_duplicates() {
+        let keywords =
+            extract_keywords(r#"rtk proxy python3 -c "import json; print(k):" rtk proxy"#);
+
+        assert!(!keywords.iter().any(|keyword| keyword.len() < 3));
+        assert!(!keywords.iter().any(|keyword| keyword == "rtk"));
+        assert_eq!(
+            keywords.len(),
+            keywords
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+    }
+
+    #[test]
+    fn reported_rtk_wrapper_command_is_not_a_behavioral_retry() {
+        let mut state = SessionState::new("reported-false-positive");
+        state.tool_call_count = 48;
+        state.record_block(
+            r#"rtk python3 -c "import json,os; print(k):""#,
+            "railguard-tamper-settings",
+            vec!["rtk".into(), "k".into(), "rtk".into()],
+            0,
+        );
+        state.tool_call_count = 49;
+
+        let result = check_behavioral_evasion(
+            &state,
+            "rtk proxy sed -n '18,35p' /home/dgarcia/Repos/agentic_ai_distribution/plugins/dev-install/skills/doctor/SKILL.md",
+        );
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn attached_shell_operators_do_not_hide_retry_keywords() {
+        for command in [
+            "terraform destroy&&echo done",
+            "terraform destroy||echo done",
+            "terraform destroy;echo done",
+            "terraform destroy|echo done",
+        ] {
+            let keywords = extract_keywords(command);
+            assert!(keywords.contains(&"terraform".to_string()), "{keywords:?}");
+            assert!(keywords.contains(&"destroy".to_string()), "{keywords:?}");
+            assert!(!keywords.contains(&"echo".to_string()), "{keywords:?}");
+
+            let mut state = SessionState::new(command);
+            state.tool_call_count = 10;
+            state.record_block(command, "terraform-destroy", keywords, 0);
+            state.tool_call_count = 11;
+            assert!(matches!(
+                check_behavioral_evasion(&state, "terraform apply -destroy"),
+                Some(ThreatTier::Tier3 { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn long_denied_commands_keep_keywords_beyond_audit_truncation() {
+        let padding = "x".repeat(520);
+        let command = format!("{padding} terraform destroy");
+        let keywords = extract_keywords(&command);
+        let mut state = SessionState::new("long-command");
+        state.tool_call_count = 10;
+        state.record_block(&command, "terraform-destroy", keywords, 0);
+        state.tool_call_count = 11;
+
+        assert!(matches!(
+            check_behavioral_evasion(&state, "terraform apply -destroy"),
+            Some(ThreatTier::Tier3 { .. })
+        ));
     }
 
     #[test]

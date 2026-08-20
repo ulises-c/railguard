@@ -878,3 +878,20 @@ fn pentest_safe_python_allowed() {
         "safe python should be allowed"
     );
 }
+
+#[test]
+fn pentest_python_chr_used_for_formatting_allowed() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let input = make_bash_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        r#"python3 -c "import json; d=json.load(open('/tmp/state.json')); print(d['command'].replace(chr(10), ' '))""#,
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "ordinary chr() formatting should be allowed: {}",
+        stdout
+    );
+}
