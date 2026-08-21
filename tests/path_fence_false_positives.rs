@@ -209,6 +209,14 @@ const REGEX_OPERAND_BESIDE_WRITE_CAPABLE: &[(&str, &str)] = &[
     ("sed range", r#"cargo test | sed -n '/1000/,$p'"#),
     ("grep literal", r#"cargo test | grep -o '/1000'"#),
     ("rg pattern", r#"cargo build | rg '/etc/passwd'"#),
+    (
+        "rtk sed address",
+        r#"rtk sed -n '/Operating/,/Wholesale/p' local.txt"#,
+    ),
+    (
+        "rtk proxy sed address",
+        r#"rtk proxy sed -n '/Flagged/,/^$/p' local.txt"#,
+    ),
 ];
 
 #[test]
@@ -246,6 +254,14 @@ const REGEX_TOOL_REAL_PATH_OUTSIDE: &[(&str, &str)] = &[
     (
         "grep -f outside",
         r#"cargo run | grep -f ~/outside/patterns.txt data.txt"#,
+    ),
+    (
+        "rtk sed file operand outside",
+        r#"rtk sed -n '/x/p' ~/outside/f.txt"#,
+    ),
+    (
+        "rtk proxy grep file operand outside",
+        r#"rtk proxy grep pattern ~/outside/f.txt"#,
     ),
 ];
 
