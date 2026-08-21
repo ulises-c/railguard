@@ -290,6 +290,23 @@ fn tier3_retry_after_block_asks_user() {
         "retry should be caught: {}",
         stdout2
     );
+    assert!(
+        stdout2.contains("Matched terms: terraform, destroy"),
+        "ask should show its evidence: {}",
+        stdout2
+    );
+
+    let trace_path = dir.path().join(format!("traces/{}.jsonl", sid));
+    let trace = std::fs::read_to_string(trace_path).unwrap();
+    let traced_ask = trace
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|entry| {
+            entry["event"] == "PreToolUse"
+                && entry["decision"] == "approve"
+                && entry["rule"] == "behavioral-evasion"
+        });
+    assert!(traced_ask, "behavioral ask should be present in the trace");
 }
 
 // ═══════════════════════════════════════════════════════════════════

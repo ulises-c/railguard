@@ -143,16 +143,33 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 state.set_pending_approval(&pattern_key);
                 let _ = state.save(&state_dir);
 
+                log_decision(
+                    input,
+                    policy,
+                    tool_name,
+                    &tool_input,
+                    "approve",
+                    Some("behavioral-evasion"),
+                    start,
+                );
+
                 let cmd_preview: String = command.chars().take(120).collect();
+                let matched_terms = match &tier {
+                    ThreatTier::Tier3 {
+                        matched_keywords, ..
+                    } => matched_keywords.join(", "),
+                    _ => String::new(),
+                };
                 return PreToolResult {
                     output: HookOutput::ask(&format!(
                         "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
                          \n\
-                         Behavioral evasion detected: a previously blocked command was \
-                         retried with different syntax.\n\
+                         This command shares multiple distinctive terms with a recently \
+                         blocked command. Matched terms: {}.\n\
                          Command: {}{}\n\
                          \n\
-                         If this is a legitimate retry, approve to allow it for the rest of this session.",
+                         If this is legitimate, approve to allow it for the rest of this session.",
+                        matched_terms,
                         cmd_preview,
                         if command.len() > 120 { "..." } else { "" }
                     )),
@@ -187,6 +204,16 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         state.record_ask(&command, pattern, keywords, 1);
                         state.set_pending_approval(&pattern_key);
                         let _ = state.save(&state_dir);
+
+                        log_decision(
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "approve",
+                            Some(pattern),
+                            start,
+                        );
 
                         let cmd_preview: String = command.chars().take(120).collect();
                         return PreToolResult {
@@ -232,6 +259,16 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         state.record_ask(&command, pattern, keywords, 2);
                         state.set_pending_approval(&pattern_key);
                         let _ = state.save(&state_dir);
+
+                        log_decision(
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "approve",
+                            Some(pattern),
+                            start,
+                        );
 
                         let cmd_preview: String = command.chars().take(120).collect();
                         return PreToolResult {
