@@ -633,7 +633,15 @@ fn effective_command_index(words: &[&str]) -> usize {
     let mut saw_prefix = false;
     while idx < words.len() {
         let w = words[idx];
-        if is_env_assignment(w) || is_wrapper(command_basename(w)) {
+        if command_basename(w) == "rtk" {
+            // RTK dispatches the remaining words as the real command. Its
+            // explicit `proxy` subcommand is routing syntax, not the command.
+            saw_prefix = true;
+            idx += 1;
+            if words.get(idx).is_some_and(|word| *word == "proxy") {
+                idx += 1;
+            }
+        } else if is_env_assignment(w) || is_wrapper(command_basename(w)) {
             saw_prefix = true;
             idx += 1;
         } else if saw_prefix
@@ -1464,6 +1472,8 @@ mod tests {
             r#"cargo test | grep -o '/1000'"#,
             r#"cargo build | rg '/etc/passwd'"#,
             r#"cargo test | grep -- '/1000/'"#,
+            r#"rtk sed -n '/Operating/,/Wholesale/p' local.txt"#,
+            r#"rtk proxy sed -n '/Flagged/,/^$/p' local.txt"#,
         ] {
             assert!(
                 extract_paths_from_command(cmd).is_empty(),
@@ -1491,6 +1501,8 @@ mod tests {
             ),
             (r#"grep -- pattern /etc/shadow"#, "/etc/shadow"),
             (r#"cat /etc/shadow | grep '/1000/'"#, "/etc/shadow"),
+            (r#"rtk sed -n '/x/p' /etc/shadow"#, "/etc/shadow"),
+            (r#"rtk proxy grep pattern /etc/shadow"#, "/etc/shadow"),
         ] {
             let paths = extract_paths_from_command(cmd);
             assert!(
