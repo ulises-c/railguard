@@ -462,6 +462,48 @@ fn remove_claude_md_section() {
     }
 }
 
+/// A confirmation the governed agent cannot answer: a native OS dialog.
+///
+/// Returns `None` when no dialog program exists, so a caller can refuse instead
+/// of falling back to a terminal prompt. That distinction is the whole point — a
+/// typed phrase is pipeable and a TTY can be manufactured with `script`, so
+/// neither is an authentication boundary against something holding shell access.
+pub fn confirm_via_dialog(message: &str, yes_label: &str) -> Option<bool> {
+    if cfg!(target_os = "macos") {
+        let script = format!(
+            "display dialog \"{}\" buttons {{\"Cancel\", \"{}\"}} \
+             default button \"Cancel\" with icon caution",
+            message.replace('"', "'"),
+            yes_label
+        );
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .ok()?;
+        return Some(output.status.success());
+    }
+
+    let zenity = vec![
+        "--question".to_string(),
+        format!("--text={}", message),
+        format!("--ok-label={}", yes_label),
+        "--cancel-label=Cancel".to_string(),
+    ];
+    let kdialog = vec![
+        "--warningyesno".to_string(),
+        message.to_string(),
+        format!("--yes-label={}", yes_label),
+        "--no-label=Cancel".to_string(),
+    ];
+    for (program, args) in [("zenity", zenity), ("kdialog", kdialog)] {
+        if let Ok(output) = std::process::Command::new(program).args(&args).output() {
+            return Some(output.status.success());
+        }
+    }
+    None
+}
+
 /// Check if we're running in an interactive terminal (not piped by an agent).
 fn is_interactive_terminal() -> bool {
     use std::io::IsTerminal;

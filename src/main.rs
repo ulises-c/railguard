@@ -375,6 +375,37 @@ fn cmd_guide() -> i32 {
 fn cmd_resume(session: Option<String>) -> i32 {
     use railguard::threat::state::SessionState;
 
+    // Resuming resets threat state, so it must be authorized through a channel the
+    // governed agent cannot reach. A TTY is not that channel — `script -qec` \
+    // manufactures one — and neither is a typed phrase, which pipes in. The
+    // self-protection rule blocking `railguard resume` is defense in depth only:
+    // one level of indirection (`R=$BIN; $R resume`) defeats any text pattern.
+    match railguard::install::hooks::confirm_via_dialog(
+        "Resume this Railguard session?\n\n\
+         This clears the termination and resets threat history for the project.",
+        "Resume",
+    ) {
+        Some(true) => {}
+        Some(false) => {
+            println!("  {} Cancelled", "●".cyan().bold());
+            return 0;
+        }
+        // Headless: refuse rather than fall back to something an agent can answer.
+        // Removing the state file by hand *is* an agent-proof path, because
+        // `railguard-protect-state` blocks every agent write under `.railguard`.
+        None => {
+            eprintln!(
+                "  {} No confirmation dialog available on this machine",
+                "✗".red().bold()
+            );
+            eprintln!();
+            eprintln!("  Clear the termination by hand instead:");
+            eprintln!("      rm .railguard/state/<session-id>.json");
+            eprintln!("  Agents are blocked from that path, so doing it yourself is the boundary.");
+            return 1;
+        }
+    }
+
     let cwd = std::env::current_dir().unwrap_or_default();
     let state_dir = match &session {
         Some(id) => SessionState::locate_state_dir(&cwd, id),
