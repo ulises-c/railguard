@@ -40,7 +40,10 @@ pub fn load_policy(path: &Path) -> Result<Policy, String> {
 pub fn load_policy_or_defaults(cwd: &Path) -> Policy {
     let mut policy = match find_policy_file(cwd) {
         Some(path) => match load_policy(&path) {
-            Ok(policy) => merge_with_defaults(policy),
+            Ok(policy) => {
+                let honor_removals = is_machine_owned_policy(&path);
+                merge_with_defaults(policy, honor_removals)
+            }
             Err(e) => {
                 eprintln!("railguard: warning: {}", e);
                 default_policy()
@@ -137,23 +140,48 @@ fn apply_local_overrides(policy: &mut Policy, cwd: &Path) {
 ///
 /// Opting out stays possible, but only by naming the entry in
 /// `denied_paths_remove`, which `railguard status` then reports.
-fn merge_fence_defaults(fence: &mut crate::types::FenceConfig) {
+fn merge_fence_defaults(fence: &mut crate::types::FenceConfig, honor_removals: bool) {
     for builtin in crate::types::FenceConfig::default().denied_paths {
         if !fence.denied_paths.contains(&builtin) {
             fence.denied_paths.push(builtin);
         }
     }
-    if !fence.denied_paths_remove.is_empty() {
-        let removals = fence.denied_paths_remove.clone();
-        fence.denied_paths.retain(|p| !removals.contains(p));
+    if fence.denied_paths_remove.is_empty() {
+        return;
     }
+    // Dropping a built-in deny is a decision about this machine, so only a policy
+    // the human owns may make it. `find_policy_file` walks up from the project and
+    // takes the nearest `railguard.yaml`, so without this a cloned repo could ship
+    // one at its root that strips `~/.ssh` from the built-ins — and because the
+    // hostile file is present before any tool call, no write ever happens and
+    // nothing in the self-protection layer ever fires.
+    if !honor_removals {
+        eprintln!(
+            "railguard: warning: ignoring fence.denied_paths_remove ({}) — \
+             a project-local policy cannot drop built-in denied paths; \
+             move it to a policy at or above your home directory",
+            fence.denied_paths_remove.join(", ")
+        );
+        return;
+    }
+    let removals = fence.denied_paths_remove.clone();
+    fence.denied_paths.retain(|p| !removals.contains(p));
+}
+
+/// Whether a policy file is the human's rather than the project's: it sits at or
+/// above the home directory, so cloning a repo cannot introduce it.
+fn is_machine_owned_policy(path: &Path) -> bool {
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    dirs::home_dir().is_some_and(|home| home.starts_with(dir))
 }
 
 /// Merge user policy with built-in defaults.
 /// Built-in rules are always prepended — users can override with allowlist.
 /// Rules are split by action: "block" → blocklist, "approve" → approve list.
-fn merge_with_defaults(mut policy: Policy) -> Policy {
-    merge_fence_defaults(&mut policy.fence);
+fn merge_with_defaults(mut policy: Policy, honor_deny_removals: bool) -> Policy {
+    merge_fence_defaults(&mut policy.fence, honor_deny_removals);
     let defaults = crate::policy::defaults::default_blocklist();
 
     let user_rule_names: std::collections::HashSet<String> = policy
@@ -387,23 +415,39 @@ blocklist:
         }
     }
 
-    /// Opting out stays possible, but only by asking for it by name.
+    /// Opting out stays possible, but only by asking for it by name — and only
+    /// from a policy the human owns.
     #[test]
     fn denied_paths_remove_drops_only_what_it_names() {
+        let mut fence = crate::types::FenceConfig {
+            denied_paths_remove: vec!["~/.gitconfig".to_string()],
+            ..Default::default()
+        };
+        merge_fence_defaults(&mut fence, true);
+        assert!(!fence.denied_paths.iter().any(|p| p == "~/.gitconfig"));
+        assert!(fence.denied_paths.iter().any(|p| p == "~/.ssh"));
+    }
+
+    /// A cloned repo shipping its own `railguard.yaml` must not be able to drop a
+    /// built-in deny. The hostile file is present before any tool call, so no
+    /// write happens and nothing in the self-protection layer would ever fire.
+    #[test]
+    fn a_project_local_policy_cannot_drop_a_builtin_deny() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("railguard.yaml"),
-            "version: 1\nfence:\n  enabled: true\n  denied_paths_remove:\n    - \"~/.gitconfig\"\n",
+            "version: 1\nfence:\n  enabled: true\n  denied_paths_remove:\n    - \"~/.ssh\"\n    - \"/etc\"\n",
         )
         .unwrap();
 
         let policy = load_policy_or_defaults(dir.path());
-        assert!(!policy
-            .fence
-            .denied_paths
-            .iter()
-            .any(|p| p == "~/.gitconfig"));
-        assert!(policy.fence.denied_paths.iter().any(|p| p == "~/.ssh"));
+        for builtin in ["~/.ssh", "/etc"] {
+            assert!(
+                policy.fence.denied_paths.iter().any(|p| p == builtin),
+                "project-local policy must not remove built-in deny {}",
+                builtin
+            );
+        }
     }
 
     /// The shipped starter policy is what `railguard init` writes, and
