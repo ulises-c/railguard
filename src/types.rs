@@ -237,6 +237,10 @@ pub struct MemoryConfig {
     pub append_only: bool,
     #[serde(default = "default_true")]
     pub verify_on_read: bool,
+    /// Let agents delete memory files with Bash (rm/unlink). Off by default:
+    /// memory stays append-only unless the human opts in via railguard.yaml.
+    #[serde(default)]
+    pub allow_delete: bool,
 }
 
 impl Default for MemoryConfig {
@@ -247,6 +251,7 @@ impl Default for MemoryConfig {
             block_secrets: true,
             append_only: true,
             verify_on_read: true,
+            allow_delete: false,
         }
     }
 }

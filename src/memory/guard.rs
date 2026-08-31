@@ -60,8 +60,12 @@ pub fn check_memory_write(
     if tool_name == "Bash" {
         if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
             if is_memory_delete_command(cmd) {
+                if config.allow_delete {
+                    return MemoryDecision::Allow;
+                }
                 return MemoryDecision::Block(
-                    "Memory Safety: Agents cannot delete memory files. Memory is append-only."
+                    "Memory Safety: Agents cannot delete memory files. Memory is append-only. \
+                     (Opt out with `memory: {allow_delete: true}` in railguard.yaml.)"
                         .to_string(),
                 );
             }
@@ -377,6 +381,30 @@ mod tests {
             "command": "rm ~/.claude/projects/foo/memory/old.md"
         });
 
+        let decision =
+            check_memory_write(&config, "Bash", "/tmp/memory/old.md", &tool_input, "s1", cwd);
+        assert!(matches!(decision, MemoryDecision::Block(_)));
+    }
+
+    #[test]
+    fn test_allow_delete_config() {
+        let config = MemoryConfig {
+            allow_delete: true,
+            ..Default::default()
+        };
+        let cwd = Path::new("/tmp");
+        let tool_input = serde_json::json!({
+            "command": "rm ~/.claude/projects/foo/memory/old.md"
+        });
+
+        let decision =
+            check_memory_write(&config, "Bash", "/tmp/memory/old.md", &tool_input, "s1", cwd);
+        assert!(matches!(decision, MemoryDecision::Allow));
+
+        // Only deletes are opted out: other Bash on memory paths stays blocked.
+        let tool_input = serde_json::json!({
+            "command": "sed -i 's/a/b/' /tmp/memory/old.md"
+        });
         let decision =
             check_memory_write(&config, "Bash", "/tmp/memory/old.md", &tool_input, "s1", cwd);
         assert!(matches!(decision, MemoryDecision::Block(_)));

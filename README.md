@@ -93,7 +93,7 @@ Railguard classifies every memory write:
 - **Behavioral instructions** ("skip safety checks", "override policy") → **asks you**
 - **Factual content** (project info, tech stack, user preferences) → **allowed**
 - **Overwrites of existing memories** → **asks you**
-- **Deletions** → **blocked**
+- **Deletions** → **blocked** (opt out with `memory: {allow_delete: true}` in `railguard.yaml`)
 
 Every memory write is signed with a content hash. Tampering between sessions is detected automatically.
 
