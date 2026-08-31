@@ -20,14 +20,18 @@ pub fn default_blocklist() -> Vec<Rule> {
         Rule {
             name: "rm-rf-critical".to_string(),
             tool: "Bash".to_string(),
-            pattern: r"(?m)(^|[;&|]\s*)rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\s+-f|-f\s+-[rR]|--recursive\s+--force|--force\s+--recursive)\s+(--\s+)?([^;&|\n]*\s)?(/|/\*|~/?|\$HOME/?|\$\{HOME\}/?|/home/?|/home/[^/\s]+/?)(\s|$|[;&|])".to_string(),
+            // Match recursive+force in compact or split forms, including the
+            // `--force -r` ordering covered by the branch's adversarial suite.
+            // The target boundary keeps `/home/user/repo` in the approval tier
+            // while filesystem roots and home-directory roots remain blocked.
+            pattern: r"(?m)(^|[;&|]\s*)rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\s+-f|-f\s+-[rR]|-[rR]\s+--force|--force\s+-[rR]|--recursive\s+--force|--force\s+--recursive)\s+(--\s+)?([^;&|\n]*\s)?(/|/\*|~/?|\$HOME/?|\$\{HOME\}/?|/home/?|/home/[^/\s]+/?)(\s|$|[;&|])".to_string(),
             action: "block".to_string(),
             message: Some("Blocked: recursive force delete of a filesystem or home root".to_string()),
         },
         Rule {
             name: "rm-rf-home-descendant".to_string(),
             tool: "Bash".to_string(),
-            pattern: r"rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\s+-f|-f\s+-[rR]|--recursive\s+--force|--force\s+--recursive)\s+(--\s+)?(~|\$HOME|\$\{HOME\}|/home/[^/\s]+)(/[^\s;&|]+)+".to_string(),
+            pattern: r"rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\s+-f|-f\s+-[rR]|-[rR]\s+--force|--force\s+-[rR]|--recursive\s+--force|--force\s+--recursive)\s+(--\s+)?(~|\$HOME|\$\{HOME\}|/home/[^/\s]+)(/[^\s;&|]+)+".to_string(),
             action: "approve".to_string(),
             message: Some("Recursive force delete under a home directory requires approval".to_string()),
         },
@@ -351,9 +355,20 @@ pub fn default_blocklist() -> Vec<Rule> {
         Rule {
             name: "railguard-tamper-settings".to_string(),
             tool: "Bash".to_string(),
-            pattern: r"\.claude/settings\.json".to_string(),
+            pattern: r"\.(claude/settings\.json|codex/(hooks\.json|config\.toml))".to_string(),
             action: "block".to_string(),
-            message: Some("Blocked: agents cannot modify Claude Code hook settings".to_string()),
+            message: Some("Blocked: agents cannot modify Railguard hook settings".to_string()),
+        },
+        // Codex reads hook trust state and the `hooks` feature flag from
+        // config.toml, so disabling hooks there neutralizes Railguard without
+        // touching hooks.json.
+        Rule {
+            name: "railguard-tamper-codex-hooks-flag".to_string(),
+            tool: "Bash".to_string(),
+            pattern: r"(--disable[= ]hooks|hooks\s*=\s*false|--dangerously-bypass-hook-trust)"
+                .to_string(),
+            action: "block".to_string(),
+            message: Some("Blocked: agents cannot disable Codex hooks".to_string()),
         },
         Rule {
             name: "railguard-remove-binary".to_string(),

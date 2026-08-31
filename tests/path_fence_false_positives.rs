@@ -459,7 +459,7 @@ fn memory_delete_is_snapshotted_before_approval() {
 #[test]
 fn claude_memory_container_roots_remain_blocked() {
     let dir = create_policy_dir(
-        "version: 1\nblocklist: []\nmemory:\n  enabled: false\nfence:\n  enabled: true\n  allowed_paths:\n    - ~/.claude\n  denied_paths: []\n",
+        "version: 1\nblocklist: []\nmemory:\n  enabled: false\nfence:\n  enabled: false\n",
     );
     let cwd = dir.path().to_str().unwrap();
 

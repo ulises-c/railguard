@@ -20,10 +20,17 @@ pub struct SessionState {
     /// Once approved, the same pattern won't prompt again.
     #[serde(default)]
     pub session_approvals: Vec<String>,
-    /// Pattern currently awaiting user approval via "ask".
-    /// If the next tool call arrives (meaning user approved), we move this to session_approvals.
+    /// Pattern currently awaiting user approval via "ask", and the `tool_use_id`
+    /// of the call that asked.
+    ///
+    /// The id is what makes the answer knowable. This used to resolve on the mere
+    /// arrival of a later tool call, on the theory that a next call proved the
+    /// human had approved — but a human who clicks *deny* also goes on to make
+    /// other tool calls, so a denial silently became a session-wide approval.
     #[serde(default)]
     pub pending_approval: Option<String>,
+    #[serde(default)]
+    pub pending_approval_tool_use_id: Option<String>,
     /// Project root captured when the session was anchored (SessionStart, or
     /// first PreToolUse for sessions without a SessionStart hook). The path
     /// fence evaluates against this instead of the per-call cwd, which drifts
@@ -76,6 +83,7 @@ impl SessionState {
             heightened_keywords: Vec::new(),
             session_approvals: Vec::new(),
             pending_approval: None,
+            pending_approval_tool_use_id: None,
             project_root: None,
             terminated: false,
             termination_reason: None,
@@ -279,13 +287,28 @@ impl SessionState {
         }
     }
 
-    /// Resolve any pending approval. Called at the start of each tool call.
-    /// If we asked the user last time and a new tool call arrived, the user approved.
-    pub fn resolve_pending_approval(&mut self) {
-        if let Some(pattern) = self.pending_approval.take() {
-            if !self.session_approvals.contains(&pattern) {
-                self.session_approvals.push(pattern);
+    /// Promote a pending approval, but only on proof that the human said yes.
+    ///
+    /// The proof is a `PostToolUse` event for the same `tool_use_id` we asked
+    /// about: the tool only runs after an approval, so a denied call never
+    /// produces one. A mismatched or absent id leaves the pending approval in
+    /// place, where it expires unused — the failure direction is "ask again".
+    pub fn resolve_pending_approval_for(&mut self, tool_use_id: Option<&str>) -> bool {
+        let Some(id) = tool_use_id else {
+            return false;
+        };
+        if self.pending_approval_tool_use_id.as_deref() != Some(id) {
+            return false;
+        }
+        self.pending_approval_tool_use_id = None;
+        match self.pending_approval.take() {
+            Some(pattern) => {
+                if !self.session_approvals.contains(&pattern) {
+                    self.session_approvals.push(pattern);
+                }
+                true
             }
+            None => false,
         }
     }
 
@@ -294,15 +317,32 @@ impl SessionState {
         self.session_approvals.iter().any(|p| p == pattern)
     }
 
-    /// Set a pattern as pending user approval.
-    pub fn set_pending_approval(&mut self, pattern: &str) {
+    /// Set a pattern as pending user approval, tagged with the call that asked.
+    pub fn set_pending_approval(&mut self, pattern: &str, tool_use_id: Option<&str>) {
         self.pending_approval = Some(pattern.to_string());
+        self.pending_approval_tool_use_id = tool_use_id.map(str::to_string);
     }
 
     pub fn mark_terminated(&mut self, reason: &str) {
         self.terminated = true;
         self.termination_reason = Some(reason.to_string());
         self.termination_timestamp = Some(chrono::Utc::now().to_rfc3339());
+    }
+
+    /// Clear a termination along with the threat history behind it.
+    ///
+    /// This is the only recovery path for a client that cannot answer an
+    /// interactive approval prompt: Codex hooks can't ask, so a terminated
+    /// Codex session would otherwise stay blocked forever.
+    pub fn clear_termination(&mut self) {
+        self.terminated = false;
+        self.termination_reason = None;
+        self.termination_timestamp = None;
+        self.suspicion_level = 0;
+        self.warning_count = 0;
+        self.block_history.clear();
+        self.heightened_keywords.clear();
+        self.pending_approval = None;
     }
 
     /// Check all state files for recently terminated sessions.
@@ -605,6 +645,31 @@ mod tests {
         state.save(dir.path()).unwrap();
         let loaded = SessionState::load(dir.path(), "anchor-test");
         assert_eq!(loaded.project_root.as_deref(), Some("/repo"));
+    }
+
+    #[test]
+    fn test_clear_termination_restores_a_clean_slate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = SessionState::new("stuck");
+        state.record_block("rev <<< x | sh", "evasion", vec!["sh".to_string()], 3);
+        state.set_pending_approval("evasion", Some("call-1"));
+        state.mark_terminated("evasion detected");
+        state.save(dir.path()).unwrap();
+
+        let mut reloaded = SessionState::load(dir.path(), "stuck");
+        assert!(reloaded.terminated);
+        reloaded.clear_termination();
+        reloaded.save(dir.path()).unwrap();
+
+        // Codex cannot answer the resume prompt, so `railguard resume` is the
+        // only way out — it must leave nothing behind that re-blocks the session.
+        let after = SessionState::load(dir.path(), "stuck");
+        assert!(!after.terminated);
+        assert!(after.termination_reason.is_none());
+        assert!(after.pending_approval.is_none());
+        assert!(after.block_history.is_empty());
+        assert_eq!(after.warning_count, 0);
+        assert_eq!(after.suspicion_level, 0);
     }
 
     #[test]

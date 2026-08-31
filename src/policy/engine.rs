@@ -1,26 +1,14 @@
-use crate::block::matcher::evaluate_tool;
+use crate::block::matcher::{evaluate_tool, matches_allowlist};
 use crate::types::{Decision, Policy};
 
 /// Evaluate a tool call against the full policy.
 /// Order: allowlist → blocklist → approve → default allow.
 pub fn evaluate(policy: &Policy, tool_name: &str, tool_input: &serde_json::Value) -> Decision {
-    // 1. Check allowlist first — if explicitly allowed, skip everything
-    if !policy.allowlist.is_empty() {
-        let applicable: Vec<_> = policy
-            .allowlist
-            .iter()
-            .filter(|r| r.tool == tool_name || r.tool == "*")
-            .cloned()
-            .collect();
-
-        if !applicable.is_empty() {
-            if let Decision::Block { .. } | Decision::Approve { .. } =
-                evaluate_tool(tool_name, tool_input, &applicable)
-            {
-                // "block" in allowlist context means "matched the allowlist" → allow
-                return Decision::Allow;
-            }
-        }
+    // 1. Check allowlist first — if explicitly allowed, skip everything.
+    // A multi-file call is allowlisted only when *every* path it touches is;
+    // otherwise one listed file would wave through the rest of the patch.
+    if matches_allowlist(tool_name, tool_input, &policy.allowlist) {
+        return Decision::Allow;
     }
 
     // 2. Check blocklist (handles both block and approve actions)

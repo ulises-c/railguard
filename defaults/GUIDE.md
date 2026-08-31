@@ -12,8 +12,13 @@ carries only the core rules; this guide is printed on demand by
   evasion detection and escalates toward a session kill. Find a genuinely
   different approach and say how it differs.
 - **Some commands require human approval.** An "ask" response means the human
-  will be prompted to approve or deny. Wait; don't route around it.
-- **File writes are snapshotted.** Every Write/Edit is backed up before
+  will be prompted to approve or deny in Claude Code. Codex does not support
+  hook-driven approval prompts, so Railguard returns a denial with instructions
+  to update the policy or allowlist first. Wait; don't route around either result.
+- **A terminated session can be revived by the human** with
+  `railguard resume [--session <id>]`. This is the only recovery path under
+  Codex, which cannot answer the resume prompt. You cannot run it yourself.
+- **File writes are snapshotted.** Every Write/Edit/apply_patch is backed up before
   execution. The human can rollback any change.
 - **Memory is guarded, not frozen.** Changing or deleting an existing memory
   file (or a project memory directory) asks the human, and deletions are
@@ -58,8 +63,9 @@ You **can** help the user customize their Railguard policy. This is
 encouraged:
 
 - **Read `railguard.yaml`** to understand the current policy.
-- **Propose edits to `railguard.yaml`** - the user will be prompted to approve
-  before any change is applied.
+- **Propose edits to `railguard.yaml`** - Claude Code prompts the user before
+  applying them; with Codex, the user must apply the proposed policy edit outside
+  the guarded tool call.
 - **Run `railguard init`** to generate a starter `railguard.yaml` if one
   doesn't exist (user approves).
 - **Run `railguard status`** to show the current protection state.
@@ -74,11 +80,12 @@ the next tool call - no restart needed.
   - base rules; edits gated to **ask**.
 - **Per-project** `.railguard.local.yaml` (project root) - additive
   `fence.allowed_paths` only; cannot weaken `denied_paths` or disable the
-  fence. Honored by default (`fence.allow_local_overrides` defaults to true);
-  the global policy can opt out with `allow_local_overrides: false`.
-- Edits to ANY railguard yaml (global or `.railguard.local.yaml`) are gated to
-  **ask**: propose the change, the human approves. Never auto-allowed, never
-  hard-blocked.
+  fence. Ignored unless the global policy opts in with
+  `fence.allow_local_overrides: true` - the override file ships inside the
+  repository being guarded, so the project cannot opt itself in.
+- Edits to ANY railguard yaml (global or `.railguard.local.yaml`) require human
+  approval. Claude Code uses **ask**; Codex denies the tool call until the human
+  applies the proposed change outside Codex. They are never auto-allowed.
 
 Out-of-project path keeps prompting and the human wants it for this project
 only -> add it to `.railguard.local.yaml`, not the global policy:
@@ -96,8 +103,12 @@ Changes take effect on the next tool call. Details:
 ## Do NOT attempt to
 
 - Run `railguard uninstall` - it will be blocked.
-- Modify `~/.claude/settings.json` - it will be blocked. (Reading it with a
-  plain read-only command is fine.)
+- Modify `~/.claude/settings.json` or anything under `~/.codex` - it will be
+  blocked. Codex keeps hook trust state and the `hooks` feature flag in
+  `~/.codex/config.toml`, so the whole directory is fenced, not just
+  `hooks.json`. Launching a nested agent with hooks disabled is blocked too.
+  Plain read-only inspection of hook settings is allowed only when a
+  machine-owned fence policy already permits access to that path.
 - Remove the railguard binary - it will be blocked.
 - Access `~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc`, or other fenced paths (if
   path fencing is enabled).

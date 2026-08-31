@@ -19,7 +19,7 @@ blocklist:
 
   - name: rm-rf-critical
     tool: Bash
-    pattern: "(?m)(^|[;&|]\\s*)rm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\\s+-f|-f\\s+-[rR]|--recursive\\s+--force|--force\\s+--recursive)\\s+(--\\s+)?([^;&|\\n]*\\s)?(/|/\\*|~/?|\\$HOME/?|\\$\\{HOME\\}/?|/home/?|/home/[^/\\s]+/?)(\\s|$|[;&|])"
+    pattern: "(?m)(^|[;&|]\\s*)rm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\\s+-f|-f\\s+-[rR]|-[rR]\\s+--force|--force\\s+-[rR]|--recursive\\s+--force|--force\\s+--recursive)\\s+(--\\s+)?([^;&|\\n]*\\s)?(/|/\\*|~/?|\\$HOME/?|\\$\\{HOME\\}/?|/home/?|/home/[^/\\s]+/?)(\\s|$|[;&|])"
     action: block
     message: "Blocked: recursive force delete of a filesystem or home root"
 
@@ -86,6 +86,27 @@ fence:
     - "/etc"
     # Claude Code settings — blocked to prevent agent from disabling Railguard
     - "~/.claude/settings.json"
+    # Codex config — blocked to prevent agent from disabling Railguard.
+    # Covers the whole directory: hooks.json defines the hooks, and config.toml
+    # holds their trust state plus the `hooks` feature flag.
+    - "~/.codex"
+    # Shell and login init files: a write here is arbitrary code execution on
+    # the human's next shell, so they rank with the credential stores rather
+    # than behind a mere out-of-project approval prompt.
+    - "~/.bashrc"
+    - "~/.bash_profile"
+    - "~/.profile"
+    - "~/.zshrc"
+    - "~/.zshenv"
+    - "~/.zprofile"
+    - "~/.config/fish"
+    # Same reachability, one indirection out: hook and alias surfaces that run
+    # on ordinary developer commands or at login.
+    - "~/.gitconfig"
+    - "~/.config/git"
+    - "~/.local/bin"
+    - "~/.config/systemd/user"
+    - "~/.config/autostart"
 
 # ── Trace ────────────────────────────────────────────────────────────
 # Structured audit log of every tool call.
