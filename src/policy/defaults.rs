@@ -20,7 +20,13 @@ pub fn default_blocklist() -> Vec<Rule> {
         Rule {
             name: "rm-rf-critical".to_string(),
             tool: "Bash".to_string(),
-            pattern: r"rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|--force\s+).*(/\s*$|/\*|~/|\$HOME|/home)".to_string(),
+            // The target group deliberately matches a *bare* `/` or `~` — one
+            // surrounded by whitespace or ending the command — rather than any
+            // path ending in a slash, so `rm -rf build/ dist/` stays allowed.
+            // Anchoring root on `/\s*$` instead missed `rm -rf / --no-preserve-root`,
+            // the only form GNU rm actually carries out, and requiring `~/` missed
+            // a bare `~`, which deletes the entire home directory.
+            pattern: r"rm\s+(-[a-zA-Z]*f[a-zA-Z]*|--force|--no-preserve-root)\s+(.*\s)?(/(\s|$)|/\*|~(/|\s|$)|\$\{?HOME\}?|/home)".to_string(),
             action: "block".to_string(),
             message: Some("Blocked: recursive force delete of critical path".to_string()),
         },

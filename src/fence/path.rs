@@ -257,7 +257,7 @@ pub fn extract_file_path(tool_name: &str, tool_input: &serde_json::Value) -> Opt
 }
 
 pub fn extract_file_paths(tool_name: &str, tool_input: &serde_json::Value) -> Vec<String> {
-    match tool_name {
+    let named = match tool_name {
         "Write" | "Edit" | "Read" => tool_input
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -272,14 +272,23 @@ pub fn extract_file_paths(tool_name: &str, tool_input: &serde_json::Value) -> Ve
             let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) else {
                 return vec![];
             };
-            extract_path_from_command(cmd).into_iter().collect()
+            return extract_path_from_command(cmd).into_iter().collect();
         }
         // Unrecognized tool — most importantly MCP tools, which Codex and Claude
         // Code both surface as `mcp__server__tool` and route through PreToolUse.
         // Returning nothing here used to skip the fence entirely, so a
         // filesystem-capable MCP server could write a denied path unchecked.
-        _ => extract_paths_from_unknown_tool(tool_input),
+        _ => return extract_paths_from_unknown_tool(tool_input),
+    };
+
+    // A named arm is a fast path, not a waiver. When its expected key is absent
+    // — `filePath` instead of `file_path` — it yielded nothing and, because the
+    // tool *was* recognized, never reached the harvester below, so the fence saw
+    // no path at all. Fall through whenever the fast path comes up empty.
+    if named.is_empty() {
+        return extract_paths_from_unknown_tool(tool_input);
     }
+    named
 }
 
 /// Nouns that mark an argument as naming a filesystem location. Matched against
@@ -372,8 +381,19 @@ pub(crate) fn key_tokens(key: &str) -> Vec<String> {
 
 fn is_path_key(key: &str) -> bool {
     let tokens = key_tokens(key);
-    // A content key wins even when it also carries a path noun, so `patch_text`
-    // and `new_file_content` stay out of the fence.
+    // The head noun decides. `new_file_content` names a body; `content_path`
+    // names a location. Vetoing on *any* content token got the first right and
+    // the second wrong, silently excluding a real destination key from the fence.
+    if let Some(head) = tokens.last() {
+        if CONTENT_KEY_TOKENS.contains(&head.as_str()) {
+            return false;
+        }
+        if PATH_KEY_TOKENS.contains(&head.as_str()) {
+            return true;
+        }
+    }
+    // No decisive head noun: fall back to the conservative reading, where a
+    // content token anywhere keeps `patch_text` out of the fence.
     if tokens
         .iter()
         .any(|t| CONTENT_KEY_TOKENS.contains(&t.as_str()))
@@ -381,6 +401,24 @@ fn is_path_key(key: &str) -> bool {
         return false;
     }
     tokens.iter().any(|t| PATH_KEY_TOKENS.contains(&t.as_str()))
+}
+
+/// Whether a payload carries file *contents* anywhere — the shape of a write.
+/// A read names a location and nothing else.
+pub fn carries_content(tool_input: &serde_json::Value) -> bool {
+    match tool_input {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(key, val)| is_content_key(key) || carries_content(val)),
+        serde_json::Value::Array(items) => items.iter().any(carries_content),
+        _ => false,
+    }
+}
+
+fn is_content_key(key: &str) -> bool {
+    key_tokens(key)
+        .iter()
+        .any(|t| CONTENT_KEY_TOKENS.contains(&t.as_str()))
 }
 
 /// Best-effort path harvest from an arbitrary tool input. Walks the whole JSON
@@ -393,7 +431,24 @@ fn is_path_key(key: &str) -> bool {
 /// ordinary non-path strings.
 fn extract_paths_from_unknown_tool(tool_input: &serde_json::Value) -> Vec<String> {
     let mut found = Vec::new();
-    harvest_paths(tool_input, false, &mut found);
+    harvest_paths(tool_input, KeyCtx::Neutral, true, &mut found);
+    found
+}
+
+/// Every value under a path-like key, project-relative spellings included.
+///
+/// The fence can skip relative values because they resolve inside the project.
+/// Railguard's own policy, state, and snapshots also live inside the project, so
+/// the self-protection layer cannot afford the same shortcut: `railguard.yaml` is
+/// the ordinary spelling of the file that decides every later decision, and
+/// filtering it out before `protected::check` left the guard blind to its most
+/// likely vector.
+pub fn extract_paths_for_protection(
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> Vec<String> {
+    let mut found = extract_file_paths(tool_name, tool_input);
+    harvest_paths(tool_input, KeyCtx::Neutral, false, &mut found);
     found
 }
 
@@ -402,25 +457,89 @@ fn extract_paths_from_unknown_tool(tool_input: &serde_json::Value) -> Vec<String
 /// Letting it stick to every descendant meant `{"files":[{"path":…,
 /// "content":"/* header */"}]}` fenced the file's contents as a path; on Codex
 /// that is an unappealable denial of an ordinary batch write.
-fn harvest_paths(value: &serde_json::Value, under_path_key: bool, out: &mut Vec<String>) {
+/// What the key above a value says about it. A key allowlist alone is a list of
+/// the names someone thought of, so an unrecognized key is `Neutral` — still
+/// eligible, on stricter evidence — rather than silently exempt.
+#[derive(Clone, Copy, PartialEq)]
+enum KeyCtx {
+    Path,
+    Content,
+    Neutral,
+}
+
+fn key_ctx(key: &str) -> KeyCtx {
+    if is_content_key(key) && !is_path_key(key) {
+        KeyCtx::Content
+    } else if is_path_key(key) {
+        KeyCtx::Path
+    } else {
+        KeyCtx::Neutral
+    }
+}
+
+fn harvest_paths(value: &serde_json::Value, ctx: KeyCtx, rooted_only: bool, out: &mut Vec<String>) {
     match value {
-        serde_json::Value::String(s)
-            if under_path_key && looks_like_path(s) && !out.iter().any(|seen| seen == s) =>
-        {
-            out.push(s.clone());
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            let eligible = match ctx {
+                // A key that names a location is taken at its word.
+                KeyCtx::Path => !trimmed.is_empty() && (!rooted_only || looks_like_path(s)),
+                // An unrecognized key needs the value itself to be convincing, and
+                // what counts as convincing differs by consumer.
+                KeyCtx::Neutral if trimmed.is_empty() => false,
+                // For the fence: rooted with a real component after the root.
+                // Requiring no whitespace as well would have excluded every path
+                // that legitimately contains a space, and it buys nothing —
+                // prose that merely mentions `/etc/shadow` does not *start* there.
+                KeyCtx::Neutral if rooted_only => is_rooted_multi_component(trimmed),
+                // For self-protection, any bare token qualifies, since the value
+                // needs no root to name `railguard.yaml`. Whitespace is then the
+                // only thing separating a filename from a sentence about one.
+                KeyCtx::Neutral => !trimmed.contains(char::is_whitespace),
+                // A file's body is never a location.
+                KeyCtx::Content => false,
+            };
+            if eligible && !out.iter().any(|seen| seen == s) {
+                out.push(s.clone());
+            }
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                harvest_paths(item, under_path_key, out);
+                harvest_paths(item, ctx, rooted_only, out);
             }
         }
         serde_json::Value::Object(map) => {
             for (key, val) in map {
-                harvest_paths(val, is_path_key(key), out);
+                let inner = key_ctx(key);
+                // A nested object inherits its parent's path context — a
+                // `{"destination":{"value":…}}` wrapper still names a destination,
+                // and recomputing from the inner key alone dropped it. Content
+                // cuts the inheritance either way.
+                let next = match (ctx, inner) {
+                    (_, KeyCtx::Content) | (KeyCtx::Content, KeyCtx::Neutral) => KeyCtx::Content,
+                    (_, KeyCtx::Path) | (KeyCtx::Path, KeyCtx::Neutral) => KeyCtx::Path,
+                    _ => KeyCtx::Neutral,
+                };
+                harvest_paths(val, next, rooted_only, out);
             }
         }
         _ => {}
     }
+}
+
+/// A rooted value with at least one real component after the root: `/etc/shadow`
+/// and `~/.ssh/id_rsa` qualify, a bare `/` or `~` does not. Keeps a lone
+/// separator in some unrelated argument from being fenced as a path.
+fn is_rooted_multi_component(value: &str) -> bool {
+    if !looks_like_path(value) {
+        return false;
+    }
+    value
+        .trim_start_matches(['/', '~', '$', '{', '}'])
+        .trim_start_matches("HOME")
+        .split(['/', '\\'])
+        .any(|part| !part.is_empty() && part != "." && part != "..")
+        || escapes_upward(value)
 }
 
 /// Values worth handing to the fence: anything rooted (`/`, `~`, `$HOME`) plus
@@ -454,8 +573,12 @@ fn escapes_upward(value: &str) -> bool {
 }
 
 /// Keys whose values are a shell command line rather than data.
+// `arg`/`args` matter as much as `argv`: the `{"command":"rm","args":["-rf","/"]}`
+// split schema is the common shape for an exec-capable MCP server, and harvesting
+// only the program name left every operand — the paths, the flags, the whole
+// meaning of the call — invisible to the fence, the blocklist, and the classifier.
 const SHELL_COMMAND_KEY_TOKENS: &[&str] = &[
-    "command", "commands", "cmd", "cmdline", "script", "shell", "argv",
+    "command", "commands", "cmd", "cmdline", "script", "shell", "argv", "arg", "args",
 ];
 
 /// The shell command a tool call will execute, if any.
@@ -478,6 +601,13 @@ pub fn extract_shell_command(tool_name: &str, tool_input: &serde_json::Value) ->
             .map(str::to_string),
         "Write" | "Edit" | "Read" | "apply_patch" => None,
         _ => {
+            // A split `{"command":"prog","args":[…]}` payload must be reassembled
+            // in invocation order first. Harvesting it generically walks the keys
+            // alphabetically, which puts the operands *before* the program and
+            // leaves `rm\s+-rf` unmatched against `-rf /etc\nrm`.
+            if let Some(reassembled) = reassemble_split_command(tool_input) {
+                return Some(reassembled);
+            }
             let mut found = Vec::new();
             harvest_commands(tool_input, false, &mut found);
             if found.is_empty() {
@@ -491,15 +621,121 @@ pub fn extract_shell_command(tool_name: &str, tool_input: &serde_json::Value) ->
     }
 }
 
+/// Keys naming the program itself, versus keys carrying its operands. `argv` is
+/// an operand key: it holds a whole invocation already in order.
+const PROGRAM_KEY_TOKENS: &[&str] = &["command", "commands", "cmd", "cmdline", "script", "shell"];
+const OPERAND_KEY_TOKENS: &[&str] = &["arg", "args", "argv"];
+
+/// Every `{"command": "prog", "args": [...]}` pair anywhere in the payload,
+/// reassembled as `prog -rf /etc` and joined one per line.
+///
+/// Pairs are matched within a single object so two sibling invocations stay two
+/// commands rather than one scrambled line, and the walk recurses because a
+/// wrapper object is free: `{"invocation":{"command":"rm","args":["-rf","/"]}}`
+/// examined only at the top level found no program, fell through to the generic
+/// harvester, and that walks keys alphabetically — emitting the operands *before*
+/// the program, where no rule matches them.
+fn reassemble_split_command(tool_input: &serde_json::Value) -> Option<String> {
+    let mut found = Vec::new();
+    collect_split_commands(tool_input, &mut found);
+    (!found.is_empty()).then(|| found.join("\n"))
+}
+
+fn collect_split_commands(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(joined) = reassemble_one_object(value) {
+                out.push(joined);
+            }
+            for val in map.values() {
+                collect_split_commands(val, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_split_commands(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The program/operand pair carried by this object itself, ignoring children.
+fn reassemble_one_object(tool_input: &serde_json::Value) -> Option<String> {
+    let map = tool_input.as_object()?;
+    let program = map
+        .iter()
+        .find(|(key, val)| {
+            val.is_string()
+                && key_tokens(key)
+                    .iter()
+                    .any(|t| PROGRAM_KEY_TOKENS.contains(&t.as_str()))
+        })
+        .and_then(|(_, val)| val.as_str())
+        .map(str::trim)
+        .filter(|program| !program.is_empty())?;
+
+    let mut parts = vec![program.to_string()];
+    for (key, val) in map {
+        if !key_tokens(key)
+            .iter()
+            .any(|t| OPERAND_KEY_TOKENS.contains(&t.as_str()))
+        {
+            continue;
+        }
+        match val {
+            serde_json::Value::Array(items) => {
+                parts.extend(items.iter().filter_map(|i| i.as_str()).map(str::to_string));
+            }
+            serde_json::Value::String(s) => parts.push(s.clone()),
+            _ => {}
+        }
+    }
+
+    // No operands found — nothing was split, so let the harvester handle it.
+    (parts.len() > 1).then(|| parts.join(" "))
+}
+
 fn is_shell_command_key(key: &str) -> bool {
     key_tokens(key)
         .iter()
         .any(|t| SHELL_COMMAND_KEY_TOKENS.contains(&t.as_str()))
 }
 
+/// A string that reads like an invocation rather than a value: a program-shaped
+/// leading word followed by at least one more token. `/etc/shadow` and
+/// `README.md` are values; `rm -rf /` and `terraform destroy` are invocations.
+///
+/// Deliberately loose. The cost of a wrong yes is that a harmless argument gets
+/// scanned by the blocklist and matches nothing; the cost of a wrong no is an
+/// ungoverned command.
+fn looks_like_invocation(value: &str) -> bool {
+    let mut words = value.split_whitespace();
+    let Some(program) = words.next() else {
+        return false;
+    };
+    if words.next().is_none() {
+        return false;
+    }
+    program.len() <= 64
+        && program
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+}
+
 fn harvest_commands(value: &serde_json::Value, under_command_key: bool, out: &mut Vec<String>) {
     match value {
         serde_json::Value::String(s) if under_command_key && !s.trim().is_empty() => {
+            out.push(s.clone());
+        }
+        // An unrecognized key is not an exemption. `SHELL_COMMAND_KEY_TOKENS` is a
+        // closed list, so an exec-capable MCP server keying its payload under
+        // `code`, `stdin`, `run` or any vendor name reached no fence, no blocklist
+        // and no classifier at all — while `harvest_paths` next door already treats
+        // an unknown key as eligible-on-stricter-evidence. The stricter evidence
+        // here is shape: a bare word is a value, but something with an argument
+        // reads like an invocation, and a content key never does.
+        serde_json::Value::String(s) if looks_like_invocation(s) => {
             out.push(s.clone());
         }
         // An argv array is one command split across elements (`["sh","-c","..."]`),
@@ -525,6 +761,12 @@ fn harvest_commands(value: &serde_json::Value, under_command_key: bool, out: &mu
         }
         serde_json::Value::Object(map) => {
             for (key, val) in map {
+                // A file's body is never a command, however shell-shaped it looks —
+                // otherwise writing a script through an MCP tool would be read as
+                // running it, and a patch body would be fed to the shell matcher.
+                if is_content_key(key) {
+                    continue;
+                }
                 harvest_commands(val, is_shell_command_key(key), out);
             }
         }

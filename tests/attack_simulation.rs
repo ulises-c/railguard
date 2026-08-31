@@ -1333,3 +1333,451 @@ fn a_disabled_fence_does_not_unlock_hook_config() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// 6. DOUBLE-BLIND REVIEW REGRESSIONS (PR #43)
+//
+// Every payload below returned `allow` before these fixes. Two independent
+// reviewers reproduced them against the built binary; the fixes live in
+// fence/path.rs, hook/pre_tool.rs, and policy/protected.rs.
+// ═══════════════════════════════════════════════════════════════════
+
+fn mcp_input(session_id: &str, cwd: &str, tool: &str, args: serde_json::Value) -> String {
+    serde_json::json!({
+        "session_id": session_id,
+        "cwd": cwd,
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": args,
+        "tool_use_id": "test-dbr"
+    })
+    .to_string()
+}
+
+/// An allowlisted program with a write mode reached the policy file unchecked:
+/// the read-only classifier keyed on the leading token and looked for a `>` that
+/// an in-place editor never needs.
+#[test]
+fn in_place_editors_cannot_rewrite_the_policy() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in [
+        "sed -i s/true/false/ railguard.yaml",
+        "sed --in-place s/true/false/ railguard.yaml",
+        "sort -o railguard.yaml payload.txt",
+        "xxd -r payload.hex railguard.yaml",
+        "yq -i .fence.enabled=false railguard.yaml",
+        "uniq payload.txt railguard.yaml",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "`{command}` must not be silently allowed, got: {stdout}"
+        );
+    }
+}
+
+/// `find -delete` destroys and `env CMD` delegates, both without a redirect.
+#[test]
+fn delegating_and_deleting_forms_cannot_reach_railguard_state() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in [
+        "find .railguard -delete",
+        "env sed -i s/a/b/ railguard.yaml",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "`{command}` must not be silently allowed, got: {stdout}"
+        );
+    }
+}
+
+/// A newline is a command separator. A read-only first line used to vouch for
+/// every line after it.
+#[test]
+fn a_newline_does_not_launder_a_second_command() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let input = make_bash_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "cat notes.txt\nsed -i s/a/b/ railguard.yaml",
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "a newline-separated in-place edit must not be allowed, got: {stdout}"
+    );
+}
+
+/// The counterweight: reading protected files must stay frictionless, or routing
+/// every call through the guard just trades a bypass for prompt fatigue.
+#[test]
+fn reading_the_policy_file_stays_quiet() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in [
+        "grep -rn railguard.yaml src/",
+        "cat railguard.yaml",
+        "head -5 railguard.yaml",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            !output_is_not_allowed(&stdout),
+            "`{command}` is a read and must not prompt, got: {stdout}"
+        );
+    }
+}
+
+/// The relative spelling is the *ordinary* one for a project file, and it was
+/// filtered out before self-protection ever saw it.
+#[test]
+fn relative_paths_from_unknown_tools_reach_self_protection() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for path in ["railguard.yaml", ".railguard/state/x.json"] {
+        let input = mcp_input(
+            &unique_session_id(),
+            dir.path().to_str().unwrap(),
+            "mcp__filesystem__write_file",
+            serde_json::json!({ "path": path, "content": "fence: {enabled: false}" }),
+        );
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "relative `{path}` must not be silently rewritten, got: {stdout}"
+        );
+    }
+}
+
+/// `{"command": "prog", "args": [...]}` is the common exec-MCP schema. Only the
+/// program name was harvested, so every operand was invisible to the fence, the
+/// blocklist, and the classifier alike.
+#[test]
+fn split_command_and_args_are_governed() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for args in [
+        serde_json::json!({ "command": "rm", "args": ["-rf", "~/"] }),
+        serde_json::json!({ "cmd": "sed", "arg": ["-i", "s/a/b/", "railguard.yaml"] }),
+    ] {
+        let input = mcp_input(
+            &unique_session_id(),
+            dir.path().to_str().unwrap(),
+            "mcp__proc__exec",
+            args.clone(),
+        );
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "split-form `{args}` must not be silently allowed, got: {stdout}"
+        );
+    }
+}
+
+/// An unrecognized key name is not an exemption, and a nested wrapper does not
+/// erase its parent's meaning.
+#[test]
+fn unlisted_and_nested_keys_still_reach_the_fence() {
+    let dir = create_policy_dir("version: 1\nfence:\n  enabled: true\n");
+    for args in [
+        serde_json::json!({ "loc": "/etc/cron.d/x", "content": "x" }),
+        serde_json::json!({ "dst": "~/.ssh/authorized_keys", "content": "ssh-rsa AAAA" }),
+        serde_json::json!({ "destination": { "value": "/etc/cron.d/x" } }),
+        serde_json::json!({ "content_path": "/etc/cron.d/x" }),
+    ] {
+        let input = mcp_input(
+            &unique_session_id(),
+            dir.path().to_str().unwrap(),
+            "mcp__fs__put",
+            args.clone(),
+        );
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "`{args}` names a path outside the project and must not be allowed, got: {stdout}"
+        );
+    }
+}
+
+/// A recognized tool whose expected key is absent fell through to nothing rather
+/// than to the harvester: `filePath` was allowed where `file_path` was denied.
+#[test]
+fn a_known_tool_with_an_unexpected_key_still_reaches_the_fence() {
+    let dir = create_policy_dir("version: 1\nfence:\n  enabled: true\n");
+    let input = mcp_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "Write",
+        serde_json::json!({ "filePath": "~/.ssh/authorized_keys", "content": "ssh-rsa AAAA" }),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "camelCase filePath must not bypass the fence, got: {stdout}"
+    );
+}
+
+/// An approval is weaker than a deny, so it must not be the whole answer to a
+/// call that also earned one. The benign path is deliberately listed first.
+#[test]
+fn an_outside_path_approval_cannot_mask_a_later_deny() {
+    let dir = create_policy_dir("version: 1\nfence:\n  enabled: true\n");
+    let input = mcp_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "mcp__fs__write_many",
+        serde_json::json!({ "paths": ["/var/tmp/benign-review", "/etc/passwd"] }),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_contains_deny(&stdout),
+        "a denied path after a benign outside one must still deny, got: {stdout}"
+    );
+}
+
+/// A wrapper hides the writing program from a classifier that reads leading
+/// tokens. `echo` is genuinely read-only; the shell runs `cp` regardless.
+#[test]
+fn command_substitution_cannot_launder_a_write() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in [
+        "echo $(cp /dev/null railguard.yaml)",
+        "test -f $(truncate -s0 railguard.yaml)",
+        "echo `cp /dev/null railguard.yaml`",
+        "echo <(cp /dev/null railguard.yaml)",
+        "echo $(rm -rf .railguard)",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "`{command}` must not be silently allowed, got: {stdout}"
+        );
+    }
+}
+
+/// Arithmetic expansion is not command substitution, and ordinary work uses it.
+#[test]
+fn arithmetic_expansion_is_not_treated_as_a_command() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let input = make_bash_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "echo $((100 / 4))",
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "arithmetic expansion must not prompt, got: {stdout}"
+    );
+}
+
+/// A searcher that delegates to another program is not read-only, whatever its
+/// leading token says.
+#[test]
+fn delegating_searchers_cannot_rewrite_the_policy() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in [
+        "fd railguard.yaml . --exec sed -i s/true/false/ {}",
+        "fd railguard.yaml . -x truncate -s0 {}",
+        "rg --pre ./evil.sh pattern railguard.yaml",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "`{command}` must not be silently allowed, got: {stdout}"
+        );
+    }
+}
+
+/// Self-protection outranks the policy, but must not *replace* it. Naming the
+/// policy file turned every blocked command into an approvable prompt — and
+/// mislabeled the prompt as a policy edit.
+#[test]
+fn naming_the_policy_file_cannot_downgrade_a_block() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in [
+        "terraform destroy  # see railguard.yaml",
+        "terraform destroy && printf x > railguard.yaml",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_contains_deny(&stdout),
+            "`{command}` must still deny, got: {stdout}"
+        );
+    }
+}
+
+/// The memory guard exempts memory paths from the fence; it must not answer for
+/// the rest of the call.
+#[test]
+fn a_memory_path_does_not_decide_the_whole_call() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let input = mcp_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "mcp__fs__write_many",
+        serde_json::json!({
+            "paths": ["~/.claude/projects/p/memory/note.md", "/etc/shadow"],
+            "content": "factual note"
+        }),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_contains_deny(&stdout),
+        "a denied path beside a memory path must still deny, got: {stdout}"
+    );
+}
+
+/// An unrecognized key is not an exemption for commands either — the mirror of
+/// the same rule for paths.
+#[test]
+fn commands_under_unrecognized_keys_are_governed() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for args in [
+        serde_json::json!({ "code": "terraform destroy" }),
+        serde_json::json!({ "stdin": "terraform destroy" }),
+        serde_json::json!({ "invocation": { "command": "terraform", "args": ["destroy"] } }),
+        serde_json::json!({ "tool": { "cmd": "rm", "args": ["-rf", "~/"] } }),
+    ] {
+        let input = mcp_input(
+            &unique_session_id(),
+            dir.path().to_str().unwrap(),
+            "mcp__sh__exec",
+            args.clone(),
+        );
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "`{args}` must not be silently allowed, got: {stdout}"
+        );
+    }
+}
+
+/// A path with a space in it is still a path.
+#[test]
+fn a_path_containing_whitespace_still_reaches_the_fence() {
+    let dir = create_policy_dir("version: 1\nfence:\n  enabled: true\n");
+    let input = mcp_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "mcp__fs__put",
+        serde_json::json!({ "loc": "/etc/with space/x" }),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "a spaced path under an unlisted key must not be allowed, got: {stdout}"
+    );
+}
+
+/// Routing unknown tools through self-protection must not make ordinary MCP
+/// reads unappealable — on Codex every approval becomes a denial.
+#[test]
+fn an_mcp_read_of_the_policy_file_stays_quiet() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let input = mcp_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "mcp__filesystem__read_file",
+        serde_json::json!({ "path": "railguard.yaml" }),
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "an MCP read of the policy file must not prompt or deny, got: {stdout}"
+    );
+}
+
+/// The two `rm` forms that actually destroy root and home.
+#[test]
+fn the_destructive_rm_forms_that_really_run_are_blocked() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in [
+        "rm -rf / --no-preserve-root",
+        "rm -rf ~",
+        "rm --force -r ~",
+        "rm -rf ${HOME}",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_contains_deny(&stdout),
+            "`{command}` must be blocked, got: {stdout}"
+        );
+    }
+}
+
+/// The counterweight: ordinary recursive cleanup inside the project is fine.
+#[test]
+fn ordinary_recursive_cleanup_is_allowed() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    let input = make_bash_input(
+        &unique_session_id(),
+        dir.path().to_str().unwrap(),
+        "rm -rf build/ dist/",
+    );
+    let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+    assert!(
+        !output_contains_deny(&stdout),
+        "project-local cleanup must not be blocked, got: {stdout}"
+    );
+}
+
+/// A program in the read-only set with no reviewed flag list used to be treated as
+/// inert. `tree -o` and `xxd IN OUT` write with no flag pattern and no redirect.
+#[test]
+fn write_modes_of_read_only_programs_are_recognized() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in [
+        "tree -o railguard.yaml sub",
+        "tree -o .railguard/state/x.json sub",
+        "xxd sub/a.txt railguard.yaml",
+        "uniq sub/a.txt railguard.yaml",
+        "sed -n 'w railguard.yaml' README.md",
+        "sed -n 's/a/b/w railguard.yaml' README.md",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_is_not_allowed(&stdout),
+            "`{command}` must not be silently allowed, got: {stdout}"
+        );
+    }
+}
+
+/// The counterweight: a flag that merely *takes a value* must not be miscounted as
+/// an output operand, or ordinary reads start prompting.
+#[test]
+fn value_taking_flags_are_not_counted_as_operands() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in [
+        "xxd -l 100 sub/a.txt",
+        "uniq -f 1 sub/a.txt",
+        "sort -k 2 sub/a.txt",
+        "tree -L 2 sub",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            !output_is_not_allowed(&stdout),
+            "`{command}` is a read and must not prompt, got: {stdout}"
+        );
+    }
+}
+
+/// `resume` clears the kill switch, so it belongs to the human at the terminal.
+#[test]
+fn agents_cannot_clear_a_termination() {
+    let dir = create_policy_dir("version: 1\nblocklist: []");
+    for command in ["railguard resume", "railguard resume --session other"] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            output_contains_deny(&stdout),
+            "`{command}` must be blocked for agents, got: {stdout}"
+        );
+    }
+}
