@@ -43,9 +43,11 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
     // tool calls and may have drifted below the project root)
     let state_dir = SessionState::locate_state_dir(cwd, &input.session_id);
     let mut state = SessionState::load(&state_dir, &input.session_id);
-    if client.supports_interactive_approval() {
-        state.resolve_pending_approval();
-    }
+    // A pending approval is NOT resolved here. The arrival of a later tool call
+    // says nothing about what the human answered — someone who clicks deny also
+    // goes on working — so inferring approval from it turned every denial into a
+    // session-wide allow. `PostToolUse` for the same `tool_use_id` is the only
+    // signal that distinguishes the two, and post_tool resolves it there.
     state.increment_tool_call();
 
     // The fence anchors to the session's stable project root, not the per-call
@@ -84,7 +86,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
             // Fall through to normal evaluation
         } else {
             if client.supports_interactive_approval() {
-                state.set_pending_approval("session-resume");
+                state.set_pending_approval("session-resume", input.tool_use_id.as_deref());
             }
             let _ = state.save(&state_dir);
             return PreToolResult {
@@ -143,7 +145,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                 let keywords = extract_keywords(&command);
                 state.record_block(&command, "behavioral-evasion", keywords, 3);
                 if client.supports_interactive_approval() {
-                    state.set_pending_approval(&pattern_key);
+                    state.set_pending_approval(&pattern_key, input.tool_use_id.as_deref());
                 }
                 let _ = state.save(&state_dir);
 
@@ -177,7 +179,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                         let keywords = extract_keywords(&command);
                         state.record_block(&command, pattern, keywords, 1);
                         if client.supports_interactive_approval() {
-                            state.set_pending_approval(&pattern_key);
+                            state.set_pending_approval(&pattern_key, input.tool_use_id.as_deref());
                         }
                         let _ = state.save(&state_dir);
 
@@ -211,7 +213,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                         let keywords = extract_keywords(&command);
                         state.record_block(&command, pattern, keywords, 2);
                         if client.supports_interactive_approval() {
-                            state.set_pending_approval(&pattern_key);
+                            state.set_pending_approval(&pattern_key, input.tool_use_id.as_deref());
                         }
                         let _ = state.save(&state_dir);
 

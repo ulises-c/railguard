@@ -20,10 +20,17 @@ pub struct SessionState {
     /// Once approved, the same pattern won't prompt again.
     #[serde(default)]
     pub session_approvals: Vec<String>,
-    /// Pattern currently awaiting user approval via "ask".
-    /// If the next tool call arrives (meaning user approved), we move this to session_approvals.
+    /// Pattern currently awaiting user approval via "ask", and the `tool_use_id`
+    /// of the call that asked.
+    ///
+    /// The id is what makes the answer knowable. This used to resolve on the mere
+    /// arrival of a later tool call, on the theory that a next call proved the
+    /// human had approved — but a human who clicks *deny* also goes on to make
+    /// other tool calls, so a denial silently became a session-wide approval.
     #[serde(default)]
     pub pending_approval: Option<String>,
+    #[serde(default)]
+    pub pending_approval_tool_use_id: Option<String>,
     /// Project root captured when the session was anchored (SessionStart, or
     /// first PreToolUse for sessions without a SessionStart hook). The path
     /// fence evaluates against this instead of the per-call cwd, which drifts
@@ -76,6 +83,7 @@ impl SessionState {
             heightened_keywords: Vec::new(),
             session_approvals: Vec::new(),
             pending_approval: None,
+            pending_approval_tool_use_id: None,
             project_root: None,
             terminated: false,
             termination_reason: None,
@@ -279,13 +287,28 @@ impl SessionState {
         }
     }
 
-    /// Resolve any pending approval. Called at the start of each tool call.
-    /// If we asked the user last time and a new tool call arrived, the user approved.
-    pub fn resolve_pending_approval(&mut self) {
-        if let Some(pattern) = self.pending_approval.take() {
-            if !self.session_approvals.contains(&pattern) {
-                self.session_approvals.push(pattern);
+    /// Promote a pending approval, but only on proof that the human said yes.
+    ///
+    /// The proof is a `PostToolUse` event for the same `tool_use_id` we asked
+    /// about: the tool only runs after an approval, so a denied call never
+    /// produces one. A mismatched or absent id leaves the pending approval in
+    /// place, where it expires unused — the failure direction is "ask again".
+    pub fn resolve_pending_approval_for(&mut self, tool_use_id: Option<&str>) -> bool {
+        let Some(id) = tool_use_id else {
+            return false;
+        };
+        if self.pending_approval_tool_use_id.as_deref() != Some(id) {
+            return false;
+        }
+        self.pending_approval_tool_use_id = None;
+        match self.pending_approval.take() {
+            Some(pattern) => {
+                if !self.session_approvals.contains(&pattern) {
+                    self.session_approvals.push(pattern);
+                }
+                true
             }
+            None => false,
         }
     }
 
@@ -294,9 +317,10 @@ impl SessionState {
         self.session_approvals.iter().any(|p| p == pattern)
     }
 
-    /// Set a pattern as pending user approval.
-    pub fn set_pending_approval(&mut self, pattern: &str) {
+    /// Set a pattern as pending user approval, tagged with the call that asked.
+    pub fn set_pending_approval(&mut self, pattern: &str, tool_use_id: Option<&str>) {
         self.pending_approval = Some(pattern.to_string());
+        self.pending_approval_tool_use_id = tool_use_id.map(str::to_string);
     }
 
     pub fn mark_terminated(&mut self, reason: &str) {
@@ -628,7 +652,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut state = SessionState::new("stuck");
         state.record_block("rev <<< x | sh", "evasion", vec!["sh".to_string()], 3);
-        state.set_pending_approval("evasion");
+        state.set_pending_approval("evasion", Some("call-1"));
         state.mark_terminated("evasion detected");
         state.save(dir.path()).unwrap();
 
