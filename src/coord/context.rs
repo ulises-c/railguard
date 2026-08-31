@@ -23,9 +23,7 @@ pub fn session_context_message(session_id: &str) -> Option<String> {
         return None;
     }
 
-    let mut lines = vec![
-        "[Railguard] Other active sessions:".to_string(),
-    ];
+    let mut lines = vec!["[Railguard] Other active sessions:".to_string()];
 
     for (sid, files) in &sessions {
         let short_sid = if sid.len() > 4 {
@@ -34,10 +32,16 @@ pub fn session_context_message(session_id: &str) -> Option<String> {
             sid
         };
         let file_list = files.join(", ");
-        lines.push(format!("  - Session ...{}: editing {}", short_sid, file_list));
+        lines.push(format!(
+            "  - Session ...{}: editing {}",
+            short_sid, file_list
+        ));
     }
 
-    lines.push("Avoid editing files locked by other sessions. Railguard will block conflicting writes.".to_string());
+    lines.push(
+        "Avoid editing files locked by other sessions. Railguard will block conflicting writes."
+            .to_string(),
+    );
 
     Some(lines.join("\n"))
 }

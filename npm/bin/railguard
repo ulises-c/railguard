@@ -1,0 +1,4 @@
+#!/bin/sh
+# This is a placeholder — replaced by the actual binary during npm install.
+echo "railguard binary not found. Run: npm install railguard" >&2
+exit 1

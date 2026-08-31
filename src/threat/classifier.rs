@@ -9,7 +9,10 @@ pub enum ThreatTier {
     /// Warning on first occurrence, termination on second.
     Tier2 { pattern: String },
     /// Behavioral: retry of blocked command with different syntax.
-    Tier3 { original_rule: String, matched_keywords: Vec<String> },
+    Tier3 {
+        original_rule: String,
+        matched_keywords: Vec<String>,
+    },
 }
 
 /// Classify the threat tier of a command.
@@ -76,7 +79,7 @@ fn detect_tier1(cmd: &str) -> Option<String> {
     // Recursive base64 (double/triple encoding)
     if regex::Regex::new(r"base64\s+(-d|--decode).*base64\s+(-d|--decode)")
         .ok()
-        .map_or(false, |re| re.is_match(cmd))
+        .is_some_and(|re| re.is_match(cmd))
     {
         return Some("recursive-base64".to_string());
     }
@@ -84,7 +87,7 @@ fn detect_tier1(cmd: &str) -> Option<String> {
     // printf hex in command substitution position
     if regex::Regex::new(r"\$\(\s*printf\s+.*\\x[0-9a-fA-F]{2}")
         .ok()
-        .map_or(false, |re| re.is_match(cmd))
+        .is_some_and(|re| re.is_match(cmd))
     {
         return Some("printf-hex-exec".to_string());
     }
@@ -92,7 +95,7 @@ fn detect_tier1(cmd: &str) -> Option<String> {
     // printf piped to shell
     if regex::Regex::new(r"printf\s+.*\|\s*(?:sh|bash|zsh|eval|source)\b")
         .ok()
-        .map_or(false, |re| re.is_match(cmd))
+        .is_some_and(|re| re.is_match(cmd))
     {
         return Some("printf-pipe-to-shell".to_string());
     }
@@ -105,7 +108,7 @@ fn detect_tier2(cmd: &str) -> Option<String> {
     // Variable assignment then execution: CMD="..."; $CMD
     if regex::Regex::new(r#"\w+=["']?[^"';]+["']?\s*[;&]\s*\$\w+"#)
         .ok()
-        .map_or(false, |re| re.is_match(cmd))
+        .is_some_and(|re| re.is_match(cmd))
     {
         return Some("variable-then-execution".to_string());
     }
@@ -113,7 +116,7 @@ fn detect_tier2(cmd: &str) -> Option<String> {
     // eval with variable expansion: eval $something
     if regex::Regex::new(r"eval\s+.*\$")
         .ok()
-        .map_or(false, |re| re.is_match(cmd))
+        .is_some_and(|re| re.is_match(cmd))
     {
         return Some("eval-dynamic".to_string());
     }
@@ -127,7 +130,7 @@ fn detect_tier2(cmd: &str) -> Option<String> {
     if assign_count >= 2
         && regex::Regex::new(r#""\$\w+\$\w+"#)
             .ok()
-            .map_or(false, |re| re.is_match(cmd))
+            .is_some_and(|re| re.is_match(cmd))
     {
         return Some("multi-variable-concat".to_string());
     }
@@ -139,11 +142,9 @@ fn detect_tier2(cmd: &str) -> Option<String> {
 /// Filters out common shell tokens and returns actionable words.
 pub fn extract_keywords(cmd: &str) -> Vec<String> {
     let noise: std::collections::HashSet<&str> = [
-        "|", "&&", "||", ";", ">", ">>", "<", "2>&1",
-        "sh", "bash", "zsh", "echo", "eval", "exec", "source",
-        "sudo", "env", "export", "set", "unset",
-        "if", "then", "else", "fi", "for", "do", "done", "while",
-        "true", "false", "test", "xargs",
+        "|", "&&", "||", ";", ">", ">>", "<", "2>&1", "sh", "bash", "zsh", "echo", "eval", "exec",
+        "source", "sudo", "env", "export", "set", "unset", "if", "then", "else", "fi", "for", "do",
+        "done", "while", "true", "false", "test", "xargs",
     ]
     .iter()
     .copied()

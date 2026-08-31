@@ -40,10 +40,7 @@ const STALE_TIMEOUT_SECS: u64 = 60;
 
 /// Return the global lock directory: ~/.railguard/locks
 pub fn lock_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".railguard")
-        .join("locks")
+    crate::trace::logger::railguard_home().join("locks")
 }
 
 /// Deterministic lock file path for a given file path.
@@ -304,13 +301,6 @@ fn write_lock(path: &Path, lock: &FileLock) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-
-    fn with_lock_dir(f: impl FnOnce(&Path)) {
-        let dir = TempDir::new().unwrap();
-        // Override lock_dir for testing by using the functions directly
-        f(dir.path());
-    }
 
     #[test]
     fn test_lock_file_path_deterministic() {

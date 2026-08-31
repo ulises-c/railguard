@@ -32,11 +32,7 @@ pub fn check_conflicts(
         }
 
         // Skip MEMORY.md index
-        if entry
-            .file_name()
-            .map(|f| f == "MEMORY.md")
-            .unwrap_or(false)
-        {
+        if entry.file_name().map(|f| f == "MEMORY.md").unwrap_or(false) {
             continue;
         }
 
@@ -65,28 +61,25 @@ pub fn check_conflicts(
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_default();
 
-                let reason = if new_name.is_some()
-                    && existing_name.is_some()
-                    && new_name == existing_name
-                {
-                    format!(
+                let reason = match (&new_name, &existing_name) {
+                    (Some(new), Some(existing)) if new == existing => format!(
                         "New memory has same name '{}' as existing memory '{}'",
-                        new_name.unwrap(),
-                        file_name
-                    )
-                } else {
-                    let shared: Vec<_> = overlap.into_iter().take(5).cloned().collect();
-                    let desc_note = if let Some(ref desc) = new_description {
-                        format!(" ({})", desc)
-                    } else {
-                        String::new()
-                    };
-                    format!(
-                        "New memory{} shares significant keyword overlap with '{}': [{}]",
-                        desc_note,
-                        file_name,
-                        shared.join(", ")
-                    )
+                        new, file_name
+                    ),
+                    _ => {
+                        let shared: Vec<_> = overlap.into_iter().take(5).cloned().collect();
+                        let desc_note = if let Some(ref desc) = new_description {
+                            format!(" ({})", desc)
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "New memory{} shares significant keyword overlap with '{}': [{}]",
+                            desc_note,
+                            file_name,
+                            shared.join(", ")
+                        )
+                    }
                 };
 
                 return Some((existing_path, reason));
@@ -156,14 +149,13 @@ fn strip_frontmatter(content: &str) -> String {
 /// Tokenize text into lowercase words, filtering noise.
 fn tokenize(text: &str) -> Vec<String> {
     let stop_words: HashSet<&str> = [
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has",
-        "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall",
-        "can", "to", "of", "in", "for", "on", "with", "at", "by", "from", "as", "into",
-        "through", "during", "before", "after", "above", "below", "between", "out", "off", "over",
-        "under", "and", "but", "or", "nor", "not", "so", "yet", "both", "either", "neither",
-        "each", "every", "all", "any", "few", "more", "most", "other", "some", "such", "no",
-        "only", "own", "same", "than", "too", "very", "this", "that", "these", "those", "it",
-        "its",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+        "to", "of", "in", "for", "on", "with", "at", "by", "from", "as", "into", "through",
+        "during", "before", "after", "above", "below", "between", "out", "off", "over", "under",
+        "and", "but", "or", "nor", "not", "so", "yet", "both", "either", "neither", "each",
+        "every", "all", "any", "few", "more", "most", "other", "some", "such", "no", "only", "own",
+        "same", "than", "too", "very", "this", "that", "these", "those", "it", "its",
     ]
     .into_iter()
     .collect();

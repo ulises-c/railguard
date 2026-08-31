@@ -13,9 +13,9 @@
 
 <p align="center">
   <a href="https://crates.io/crates/railguard"><img src="https://img.shields.io/crates/v/railguard.svg" alt="crates.io"></a>
-  <a href="https://github.com/railyard-dev/railguard/stargazers"><img src="https://img.shields.io/github/stars/railyard-dev/railguard?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/ulises-c/railguard/stargazers"><img src="https://img.shields.io/github/stars/ulises-c/railguard?style=flat" alt="GitHub stars"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/tests-151%20passed-brightgreen" alt="Tests">
+  <a href="https://github.com/ulises-c/railguard/actions/workflows/ci.yml"><img src="https://github.com/ulises-c/railguard/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/built%20with-Rust-orange.svg" alt="Built with Rust">
   <a href="https://discord.gg/MyaUZSus"><img src="https://img.shields.io/badge/discord-join-7289da.svg" alt="Discord"></a>
 </p>
@@ -29,7 +29,7 @@
 Railguard is the middle ground.
 
 ```
-cargo install railguard
+cargo install --git https://github.com/ulises-c/railguard
 railguard install
 ```
 
@@ -47,17 +47,19 @@ Railguard intercepts every tool call and decides in under 2ms: allow, block, or 
 | git commit -m "feat: add auth" | ✅ allowed |
 | terraform destroy --auto-approve | ⛔ blocked |
 | rm -rf ~/ | ⛔ blocked |
+| rm -rf ~/Repos/old-copy | ⚠️ asks you |
+| git clean -fdX | ⚠️ asks you |
 | echo payload \| base64 -d \| sh | ⛔ blocked |
 | cat ~/.ssh/id_ed25519 | ⛔ blocked |
 | curl -X POST api.com -d @secrets | ⚠️ asks you |
-| git push --force origin main | ⚠️ asks you |
+| git push --force origin main | ⛔ blocked |
 
 The same command can get different decisions depending on context:
 
 | | | |
 |---|---|---|
 | rm dist/bundle.js | inside project | ✅ allowed |
-| rm ~/.bashrc | outside project | ⛔ blocked |
+| rm ~/.bashrc | outside project | ⚠️ asks you |
 
 99% of commands flow through instantly. You only see Railguard when it matters.
 
@@ -93,7 +95,8 @@ Railguard classifies every memory write:
 - **Behavioral instructions** ("skip safety checks", "override policy") → **asks you**
 - **Factual content** (project info, tech stack, user preferences) → **allowed**
 - **Overwrites of existing memories** → **asks you**
-- **Deletions** → **blocked** (opt out with `memory: {allow_delete: true}` in `railguard.yaml`)
+- **File or project-memory-directory deletions** → **snapshotted, then ask you** (`memory: {allow_delete: true}` skips the ask)
+- **Deleting all Claude state or all project memories** → **blocked**
 
 Every memory write is signed with a content hash. Tampering between sessions is detected automatically.
 
@@ -119,6 +122,12 @@ allowlist:
 
 ---
 
+## For your agent
+
+Drop [`templates/AGENTS.md`](templates/AGENTS.md) into your project to tell your coding agent how to work productively under Railguard — how to read allow/ask/block responses, why it must never retry a blocked command, how to stay on the right side of the path fence, and how to roll back. (`railguard install` also injects a short guardrails block into your `CLAUDE.md` automatically.)
+
+---
+
 ## Also included
 
 - **Path fencing** · ~/.ssh, ~/.aws, ~/.gnupg, /etc fenced by default
@@ -132,4 +141,4 @@ allowlist:
 
 [Join the Discord](https://discord.gg/MyaUZSus)
 
-MIT License.
+MIT License. This project is an independent continuation of an earlier work — see [`ATTRIBUTION.md`](ATTRIBUTION.md) for its origin and license lineage.

@@ -59,19 +59,14 @@ fn classify_behavioral_override_railguard() {
 #[test]
 fn classify_factual_project_info() {
     let content = "---\nname: project-stack\ndescription: Tech stack info\ntype: project\n---\n\nThis project uses:\n- PostgreSQL 15\n- Redis for caching\n- Next.js 14 frontend";
-    assert_eq!(
-        classifier::classify(content),
-        MemoryClassification::Factual
-    );
+    assert_eq!(classifier::classify(content), MemoryClassification::Factual);
 }
 
 #[test]
 fn classify_factual_user_role() {
-    let content = "---\nname: user-info\ntype: user\n---\n\nSenior backend engineer, 10 years Go experience.";
-    assert_eq!(
-        classifier::classify(content),
-        MemoryClassification::Factual
-    );
+    let content =
+        "---\nname: user-info\ntype: user\n---\n\nSenior backend engineer, 10 years Go experience.";
+    assert_eq!(classifier::classify(content), MemoryClassification::Factual);
 }
 
 // ── Guard Tests (full flow) ──
@@ -146,7 +141,7 @@ fn guard_allows_factual_write() {
 }
 
 #[test]
-fn guard_blocks_bash_rm_of_memory() {
+fn guard_asks_before_bash_rm_of_memory() {
     let config = MemoryConfig::default();
     let cwd = Path::new("/tmp");
     let tool_input = serde_json::json!({
@@ -162,9 +157,9 @@ fn guard_blocks_bash_rm_of_memory() {
         cwd,
     );
 
-    assert!(matches!(decision, MemoryDecision::Block(_)));
-    if let MemoryDecision::Block(reason) = decision {
-        assert!(reason.contains("delete") || reason.contains("append-only"));
+    assert!(matches!(decision, MemoryDecision::Approve(_)));
+    if let MemoryDecision::Approve(reason) = decision {
+        assert!(reason.contains("delete"));
     }
 }
 
@@ -342,8 +337,15 @@ fn provenance_tracks_human_approval() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path();
 
-    let entry =
-        provenance::sign(cwd, "session-1", "/tmp/mem.md", "content", "behavioral", true).unwrap();
+    let entry = provenance::sign(
+        cwd,
+        "session-1",
+        "/tmp/mem.md",
+        "content",
+        "behavioral",
+        true,
+    )
+    .unwrap();
     assert!(entry.human_approved);
     assert_eq!(entry.provenance, "human-confirmed");
 }
@@ -382,6 +384,9 @@ fn memory_path_detection() {
     )));
     assert!(guard::is_memory_path(
         "~/.claude/projects/-Users-test-myproject/memory/feedback_testing.md"
+    ));
+    assert!(guard::is_memory_path(
+        "~/.claude/projects/-Users-test-myproject/memory"
     ));
 
     // Not memory paths
@@ -445,24 +450,30 @@ fn attack_exfiltrate_secrets_via_memory() {
 }
 
 #[test]
-fn attack_delete_memory_via_bash() {
-    // Agent tries to delete memory files via bash
+fn deletion_commands_require_approval_for_memory() {
     let config = MemoryConfig::default();
     let cwd = Path::new("/tmp");
-    let tool_input = serde_json::json!({
-        "command": "rm -rf ~/.claude/projects/foo/memory/"
-    });
+    for command in [
+        "rm -rf ~/.claude/projects/foo/memory",
+        "find ~/.claude/projects/foo/memory -depth -delete",
+        "unlink ~/.claude/projects/foo/memory/old.md",
+        "rmdir ~/.claude/projects/foo/memory",
+    ] {
+        let tool_input = serde_json::json!({ "command": command });
+        let decision = guard::check_memory_write(
+            &config,
+            "Bash",
+            "~/.claude/projects/foo/memory",
+            &tool_input,
+            "session-1",
+            cwd,
+        );
 
-    let decision = guard::check_memory_write(
-        &config,
-        "Bash",
-        "~/.claude/projects/foo/memory/",
-        &tool_input,
-        "session-1",
-        cwd,
-    );
-
-    assert!(matches!(decision, MemoryDecision::Block(_)));
+        assert!(
+            matches!(decision, MemoryDecision::Approve(_)),
+            "`{command}` should require approval, got {decision:?}"
+        );
+    }
 }
 
 #[test]
@@ -474,7 +485,11 @@ fn attack_tamper_existing_memory() {
     let memory_dir = dir.path().join("memory");
     std::fs::create_dir_all(&memory_dir).unwrap();
     let existing = memory_dir.join("trusted.md");
-    std::fs::write(&existing, "---\nname: trusted\ntype: project\n---\nOriginal trusted content.").unwrap();
+    std::fs::write(
+        &existing,
+        "---\nname: trusted\ntype: project\n---\nOriginal trusted content.",
+    )
+    .unwrap();
 
     let file_path = existing.display().to_string();
     let tool_input = serde_json::json!({

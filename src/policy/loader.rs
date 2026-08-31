@@ -38,7 +38,7 @@ pub fn load_policy(path: &Path) -> Result<Policy, String> {
 /// Load policy from directory, or return defaults if no file found.
 /// Always merges built-in defaults — user rules are additive.
 pub fn load_policy_or_defaults(cwd: &Path) -> Policy {
-    match find_policy_file(cwd) {
+    let mut policy = match find_policy_file(cwd) {
         Some(path) => match load_policy(&path) {
             Ok(policy) => merge_with_defaults(policy),
             Err(e) => {
@@ -47,6 +47,77 @@ pub fn load_policy_or_defaults(cwd: &Path) -> Policy {
             }
         },
         None => default_policy(),
+    };
+    apply_local_overrides(&mut policy, cwd);
+    policy
+}
+
+/// Project-local, additive override file. Distinct from the `.railguard.yaml`
+/// full-policy file that `find_policy_file` resolves.
+const LOCAL_OVERRIDE_FILE: &str = ".railguard.local.yaml";
+
+#[derive(Default, serde::Deserialize)]
+struct LocalOverride {
+    #[serde(default)]
+    fence: LocalFenceOverride,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct LocalFenceOverride {
+    #[serde(default)]
+    allowed_paths: Vec<String>,
+}
+
+/// Walk up from `start_dir` for a project-local override file.
+fn find_local_override_file(start_dir: &Path) -> Option<PathBuf> {
+    let mut current = start_dir.to_path_buf();
+    loop {
+        let candidate = current.join(LOCAL_OVERRIDE_FILE);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Apply a project-local `.railguard.local.yaml`. It may only *add* entries to
+/// `fence.allowed_paths`; it cannot touch `denied_paths` or any other policy.
+/// Honored only when the base policy opted in with `fence.allow_local_overrides:
+/// true`, so a cloned or hostile repo cannot self-grant filesystem access. Even
+/// when honored, denied paths still take precedence in the fence check, so the
+/// override can never expose `~/.ssh`, `/etc`, etc.
+fn apply_local_overrides(policy: &mut Policy, cwd: &Path) {
+    if !policy.fence.allow_local_overrides {
+        return;
+    }
+    let Some(path) = find_local_override_file(cwd) else {
+        return;
+    };
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("railguard: warning: cannot read {}: {}", path.display(), e);
+            return;
+        }
+    };
+    let overrides: LocalOverride = match serde_yaml::from_str(&contents) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!(
+                "railguard: warning: ignoring invalid {}: {}",
+                path.display(),
+                e
+            );
+            return;
+        }
+    };
+    for p in overrides.fence.allowed_paths {
+        if !policy.fence.allowed_paths.contains(&p) {
+            policy.fence.allowed_paths.push(p);
+        }
     }
 }
 
@@ -187,5 +258,78 @@ blocklist:
 
         let result = load_policy(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_local_override_adds_allowed_paths_when_opted_in() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("railguard.yaml"),
+            "version: 1\nfence:\n  enabled: true\n  allow_local_overrides: true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".railguard.local.yaml"),
+            "fence:\n  allowed_paths:\n    - \"~/notes\"\n",
+        )
+        .unwrap();
+
+        let policy = load_policy_or_defaults(dir.path());
+        assert!(policy.fence.allowed_paths.iter().any(|p| p == "~/notes"));
+    }
+
+    #[test]
+    fn test_local_override_honored_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("railguard.yaml"),
+            "version: 1\nfence:\n  enabled: true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".railguard.local.yaml"),
+            "fence:\n  allowed_paths:\n    - \"~/notes\"\n",
+        )
+        .unwrap();
+
+        let policy = load_policy_or_defaults(dir.path());
+        assert!(policy.fence.allowed_paths.iter().any(|p| p == "~/notes"));
+    }
+
+    #[test]
+    fn test_local_override_ignored_when_opted_out() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("railguard.yaml"),
+            "version: 1\nfence:\n  enabled: true\n  allow_local_overrides: false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".railguard.local.yaml"),
+            "fence:\n  allowed_paths:\n    - \"~/notes\"\n",
+        )
+        .unwrap();
+
+        let policy = load_policy_or_defaults(dir.path());
+        assert!(!policy.fence.allowed_paths.iter().any(|p| p == "~/notes"));
+    }
+
+    #[test]
+    fn test_local_override_cannot_weaken_denied_paths() {
+        // Even opted in, the override only adds allowed_paths; denies are untouched.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("railguard.yaml"),
+            "version: 1\nfence:\n  enabled: true\n  allow_local_overrides: true\n  denied_paths:\n    - \"~/.ssh\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".railguard.local.yaml"),
+            "fence:\n  allowed_paths:\n    - \"~/.ssh\"\n  denied_paths: []\n",
+        )
+        .unwrap();
+
+        let policy = load_policy_or_defaults(dir.path());
+        assert!(policy.fence.denied_paths.iter().any(|p| p == "~/.ssh"));
     }
 }

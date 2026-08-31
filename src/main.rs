@@ -2,10 +2,17 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::path::Path;
 
-use railguard::{configure, coord, context, dashboard, hook, install, memory, policy, replay, snapshot, trace, update};
+use railguard::{
+    configure, context, coord, dashboard, hook, install, memory, policy, replay, snapshot, trace,
+    update,
+};
 
 #[derive(Parser)]
-#[command(name = "railguard", version, about = "A secure runtime for Claude Code.")]
+#[command(
+    name = "railguard",
+    version,
+    about = "A secure runtime for Claude Code."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -21,6 +28,9 @@ enum Commands {
 
     /// Generate a starter railguard.yaml in the current directory
     Init,
+
+    /// Print the full agent guide (rollback, policy layers, quirks)
+    Guide,
 
     /// Internal: handle a hook event (reads JSON from stdin)
     Hook {
@@ -154,15 +164,25 @@ fn main() {
         Some(Commands::Install) => cmd_install(),
         Some(Commands::Uninstall) => cmd_uninstall(),
         Some(Commands::Init) => cmd_init(),
+        Some(Commands::Guide) => cmd_guide(),
         Some(Commands::Hook { event }) => hook::handler::run(&event),
         Some(Commands::Log { session, count }) => cmd_log(session, count),
-        Some(Commands::Rollback { id, session, file, steps }) => cmd_rollback(id, session, file, steps),
+        Some(Commands::Rollback {
+            id,
+            session,
+            file,
+            steps,
+        }) => cmd_rollback(id, session, file, steps),
         Some(Commands::Context { session, verbose }) => cmd_context(&session, verbose),
         Some(Commands::Diff { session, file }) => cmd_diff(&session, file),
         Some(Commands::Status) => cmd_status(),
         Some(Commands::Configure) => configure::run_configure(),
         Some(Commands::Chat) => cmd_chat(),
-        Some(Commands::Dashboard { session, stream, history }) => {
+        Some(Commands::Dashboard {
+            session,
+            stream,
+            history,
+        }) => {
             if stream {
                 dashboard::run_stream(session, history)
             } else {
@@ -195,11 +215,18 @@ fn cmd_install() -> i32 {
 
             println!("  {} Hooks registered with Claude Code", "✓".green().bold());
             println!("  {} {}", "✓".green().bold(), msg);
-            println!("  {} {} default rules active", "✓".green().bold(), rule_count);
+            println!(
+                "  {} {} default rules active",
+                "✓".green().bold(),
+                rule_count
+            );
 
             // Prompt to enable bypass permissions (Railguard replaces it)
             println!();
-            println!("  {} We recommend enabling skip permissions — Railguard replaces", "→".cyan().bold());
+            println!(
+                "  {} We recommend enabling skip permissions — Railguard replaces",
+                "→".cyan().bold()
+            );
             println!("    Claude Code's permission system with its own guardrails,");
             println!("    so you won't need to approve every command manually.");
             println!();
@@ -212,17 +239,27 @@ fn cmd_install() -> i32 {
             if enable_bypass {
                 match install::hooks::enable_bypass_permissions() {
                     Ok(_) => {
-                        println!("  {} Skip permissions enabled — Railguard handles safety now", "✓".green().bold());
+                        println!(
+                            "  {} Skip permissions enabled — Railguard handles safety now",
+                            "✓".green().bold()
+                        );
                     }
                     Err(e) => {
-                        eprintln!("  {} Failed to enable bypass mode: {}", "✗".yellow().bold(), e);
+                        eprintln!(
+                            "  {} Failed to enable bypass mode: {}",
+                            "✗".yellow().bold(),
+                            e
+                        );
                     }
                 }
             }
 
             println!();
             println!("  Customize with: {}", "railguard init".cyan());
-            println!("  Or use as plugin: {}", "claude --plugin-dir $(railguard plugin)".cyan());
+            println!(
+                "  Or use as plugin: {}",
+                "claude --plugin-dir $(railguard plugin)".cyan()
+            );
             0
         }
         Err(e) => {
@@ -234,27 +271,31 @@ fn cmd_install() -> i32 {
 
 fn cmd_plugin() -> i32 {
     // Find the plugin directory: look for .claude-plugin/plugin.json relative to the binary
-    let plugin_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            // Walk up from the binary to find the repo root with .claude-plugin/
-            let mut dir = exe.parent()?.to_path_buf();
-            for _ in 0..5 {
-                if dir.join(".claude-plugin").join("plugin.json").exists() {
-                    return Some(dir);
-                }
-                dir = dir.parent()?.to_path_buf();
+    let plugin_dir = std::env::current_exe().ok().and_then(|exe| {
+        // Walk up from the binary to find the repo root with .claude-plugin/
+        let mut dir = exe.parent()?.to_path_buf();
+        for _ in 0..5 {
+            if dir.join(".claude-plugin").join("plugin.json").exists() {
+                return Some(dir);
             }
-            None
-        });
+            dir = dir.parent()?.to_path_buf();
+        }
+        None
+    });
 
     match plugin_dir {
         Some(dir) => {
             println!("{}", dir.display());
             eprintln!();
-            eprintln!("  Usage: {}", format!("claude --plugin-dir {}", dir.display()).cyan());
+            eprintln!(
+                "  Usage: {}",
+                format!("claude --plugin-dir {}", dir.display()).cyan()
+            );
             eprintln!();
-            eprintln!("  This loads Railguard as a Claude Code plugin — no need to run {}.", "railguard install".cyan());
+            eprintln!(
+                "  This loads Railguard as a Claude Code plugin — no need to run {}.",
+                "railguard install".cyan()
+            );
             0
         }
         None => {
@@ -262,7 +303,10 @@ fn cmd_plugin() -> i32 {
             eprintln!("  Expected .claude-plugin/plugin.json near the railguard binary.");
             eprintln!();
             eprintln!("  If you installed via cargo, the plugin files are in the source repo.");
-            eprintln!("  Clone the repo and use: {}", "claude --plugin-dir /path/to/railguard".cyan());
+            eprintln!(
+                "  Clone the repo and use: {}",
+                "claude --plugin-dir /path/to/railguard".cyan()
+            );
             1
         }
     }
@@ -295,14 +339,26 @@ fn cmd_init() -> i32 {
             println!("  {} Created railguard.yaml", "✓".green().bold());
             println!();
             println!("  Edit this file to customize your policy.");
-            println!("  Run {} to configure interactively.", "railguard chat".cyan());
+            println!(
+                "  Run {} to configure interactively.",
+                "railguard chat".cyan()
+            );
             0
         }
         Err(e) => {
-            eprintln!("  {} Failed to create railguard.yaml: {}", "✗".red().bold(), e);
+            eprintln!(
+                "  {} Failed to create railguard.yaml: {}",
+                "✗".red().bold(),
+                e
+            );
             1
         }
     }
+}
+
+fn cmd_guide() -> i32 {
+    print!("{}", include_str!("../defaults/GUIDE.md"));
+    0
 }
 
 fn cmd_log(session: Option<String>, count: usize) -> i32 {
@@ -330,14 +386,19 @@ fn cmd_log(session: Option<String>, count: usize) -> i32 {
             Ok(sessions) => {
                 if sessions.is_empty() {
                     println!("  No trace sessions found.");
-                    println!("  Traces are created automatically when Claude Code runs with railguard.");
+                    println!(
+                        "  Traces are created automatically when Claude Code runs with railguard."
+                    );
                 } else {
                     println!("  {} Sessions with traces:\n", "●".cyan());
                     for s in &sessions {
                         println!("    {}", s);
                     }
                     println!();
-                    println!("  View a session: {}", "railguard log --session <id>".cyan());
+                    println!(
+                        "  View a session: {}",
+                        "railguard log --session <id>".cyan()
+                    );
                 }
                 0
             }
@@ -383,8 +444,14 @@ fn cmd_rollback(
                         println!("{}", line);
                     }
                     println!();
-                    println!("  Rollback: {}", "railguard rollback --id <id> --session <session>".cyan());
-                    println!("  Undo last N: {}", "railguard rollback --steps 3 --session <session>".cyan());
+                    println!(
+                        "  Rollback: {}",
+                        "railguard rollback --id <id> --session <session>".cyan()
+                    );
+                    println!(
+                        "  Undo last N: {}",
+                        "railguard rollback --steps 3 --session <session>".cyan()
+                    );
                 }
                 0
             }
@@ -477,7 +544,11 @@ fn cmd_status() -> i32 {
 
     match install::hooks::check_installed() {
         Ok(true) => println!("  {} Hooks installed in Claude Code", "✓".green().bold()),
-        Ok(false) => println!("  {} Hooks not installed (run {})", "✗".yellow().bold(), "railguard install".cyan()),
+        Ok(false) => println!(
+            "  {} Hooks not installed (run {})",
+            "✗".yellow().bold(),
+            "railguard install".cyan()
+        ),
         Err(e) => println!("  {} Could not check hooks: {}", "?".yellow().bold(), e),
     }
 
@@ -490,14 +561,48 @@ fn cmd_status() -> i32 {
             println!("       {} blocklist rules", loaded_policy.blocklist.len());
             println!("       {} approve rules", loaded_policy.approve.len());
             println!("       {} allowlist rules", loaded_policy.allowlist.len());
-            println!("       fence: {}", if loaded_policy.fence.enabled { "on" } else { "off" });
-            println!("       trace: {}", if loaded_policy.trace.enabled { "on" } else { "off" });
-            println!("       snapshot: {}", if loaded_policy.snapshot.enabled { "on" } else { "off" });
-            println!("       memory safety: {}", if loaded_policy.memory.enabled { "on" } else { "off" });
+            println!(
+                "       fence: {}",
+                if loaded_policy.fence.enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
+            println!(
+                "       trace: {}",
+                if loaded_policy.trace.enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
+            println!(
+                "       snapshot: {}",
+                if loaded_policy.snapshot.enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
+            println!(
+                "       memory safety: {}",
+                if loaded_policy.memory.enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
         }
         None => {
-            println!("  {} No railguard.yaml found (using defaults)", "●".cyan().bold());
-            println!("       {} default rules active", loaded_policy.blocklist.len());
+            println!(
+                "  {} No railguard.yaml found (using defaults)",
+                "●".cyan().bold()
+            );
+            println!(
+                "       {} default rules active",
+                loaded_policy.blocklist.len()
+            );
         }
     }
 
@@ -532,7 +637,12 @@ fn cmd_locks() -> i32 {
         } else {
             session_id
         };
-        println!("  {} Session {}...  ({} files)", "●".cyan(), short, files.len());
+        println!(
+            "  {} Session {}...  ({} files)",
+            "●".cyan(),
+            short,
+            files.len()
+        );
         for lock in files {
             let elapsed = chrono::DateTime::parse_from_rfc3339(&lock.last_heartbeat)
                 .map(|hb| {
@@ -557,9 +667,7 @@ fn cmd_chat() -> i32 {
     println!("  Launching interactive policy configuration...");
     println!();
 
-    let claude_check = std::process::Command::new("which")
-        .arg("claude")
-        .output();
+    let claude_check = std::process::Command::new("which").arg("claude").output();
 
     match claude_check {
         Ok(output) if output.status.success() => {
@@ -608,11 +716,7 @@ snapshot:
 
 Read the current railguard.yaml (if it exists) and help the user modify it based on their needs. Always write valid YAML with valid regex patterns."#;
 
-            let status = std::process::Command::new("claude")
-                .arg("--print")
-                .arg("-p")
-                .arg(prompt)
-                .status();
+            let status = std::process::Command::new("claude").arg(prompt).status();
 
             match status {
                 Ok(s) => s.code().unwrap_or(0),
@@ -627,7 +731,10 @@ Read the current railguard.yaml (if it exists) and help the user modify it based
             eprintln!("  Install it: https://docs.anthropic.com/en/docs/claude-code");
             eprintln!();
             eprintln!("  Alternatively, edit railguard.yaml manually.");
-            eprintln!("  Run {} to generate a starter config.", "railguard init".cyan());
+            eprintln!(
+                "  Run {} to generate a starter config.",
+                "railguard init".cyan()
+            );
             1
         }
     }
@@ -644,7 +751,9 @@ fn cmd_memory(action: MemoryCommands) -> i32 {
             let entries = memory::provenance::load_entries(&cwd);
             if entries.is_empty() {
                 println!("  No memory provenance records found.");
-                println!("  Records are created when Claude Code writes memory files through Railguard.");
+                println!(
+                    "  Records are created when Claude Code writes memory files through Railguard."
+                );
                 return 0;
             }
 
@@ -691,7 +800,10 @@ fn cmd_memory(action: MemoryCommands) -> i32 {
 
             let warnings = memory::guard::verify_memory_integrity(&cwd);
             if warnings.is_empty() {
-                println!("  {} All memory files verified — no integrity issues", "✓".green().bold());
+                println!(
+                    "  {} All memory files verified — no integrity issues",
+                    "✓".green().bold()
+                );
             } else {
                 println!(
                     "  {} {} issue(s) found:\n",
@@ -702,7 +814,10 @@ fn cmd_memory(action: MemoryCommands) -> i32 {
                     println!("    {} {}", "•".yellow(), warning);
                 }
                 println!();
-                println!("  To trust a file: {}", "railguard memory trust <file>".cyan());
+                println!(
+                    "  To trust a file: {}",
+                    "railguard memory trust <file>".cyan()
+                );
                 println!(
                     "  To quarantine: {}",
                     "railguard memory quarantine <file>".cyan()
@@ -793,7 +908,9 @@ fn cmd_memory(action: MemoryCommands) -> i32 {
                         file,
                         quarantined
                     );
-                    println!("  The memory file has been renamed and will not be loaded by Claude Code.");
+                    println!(
+                        "  The memory file has been renamed and will not be loaded by Claude Code."
+                    );
                     0
                 }
                 Err(e) => {
@@ -848,4 +965,3 @@ fn cmd_memory(action: MemoryCommands) -> i32 {
         }
     }
 }
-

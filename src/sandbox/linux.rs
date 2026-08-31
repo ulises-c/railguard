@@ -43,7 +43,11 @@ pub fn generate_bwrap_command(config: &FenceConfig, cwd: &str) -> String {
     // Always shadow sensitive dirs
     for sensitive in &[".ssh", ".aws", ".gnupg"] {
         let full = format!("{}/{}", home, sensitive);
-        if !config.denied_paths.iter().any(|d| expand_path(d, &home) == full) {
+        if !config
+            .denied_paths
+            .iter()
+            .any(|d| expand_path(d, &home) == full)
+        {
             args.push(format!("--tmpfs {}", full));
         }
     }
@@ -136,6 +140,7 @@ mod tests {
             enabled: true,
             allowed_paths: vec![],
             denied_paths: vec!["~/.ssh".to_string()],
+            allow_local_overrides: false,
         };
         let cmd = generate_bwrap_command(&config, "/home/user/project");
         assert!(cmd.contains("bwrap"));
@@ -149,6 +154,7 @@ mod tests {
             enabled: true,
             allowed_paths: vec![],
             denied_paths: vec!["~/.ssh".to_string()],
+            allow_local_overrides: false,
         };
         let code = generate_landlock_snippet(&config, "/home/user/project");
         assert!(code.contains("Landlock"));

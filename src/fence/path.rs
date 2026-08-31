@@ -2,6 +2,11 @@ use std::path::Path;
 
 use crate::types::FenceConfig;
 
+/// Appended to out-of-allowlist fence prompts (never to hard denials): these
+/// are candidates for a policy allowlist entry, not safety blocks, so nudge
+/// toward requesting the modification instead of repeated one-off approvals.
+const ALLOWLIST_NUDGE: &str = " If this path is needed regularly, ask the human to allow it: add it to fence.allowed_paths in the project's .railguard.local.yaml (additive-only; denies always win) or in the global railguard.yaml. Details: `railguard guide`.";
+
 /// Result of a path fence check.
 #[derive(Debug, PartialEq)]
 pub enum PathCheck {
@@ -57,16 +62,16 @@ pub fn check_path(config: &FenceConfig, file_path: &str, cwd: &str) -> PathCheck
             }
         }
         return PathCheck::OutsideProject(format!(
-            "Path Fence: '{}' is not in any allowed path",
-            file_path
+            "Path Fence: '{}' is not in any allowed path.{}",
+            file_path, ALLOWLIST_NUDGE
         ));
     }
 
     // Default behavior: path outside the project directory needs approval
     if !path_starts_with(&canonical, &cwd_canonical) {
         return PathCheck::OutsideProject(format!(
-            "Path Fence: '{}' is outside project directory '{}'",
-            file_path, cwd
+            "Path Fence: '{}' is outside project directory '{}'.{}",
+            file_path, cwd, ALLOWLIST_NUDGE
         ));
     }
 
@@ -195,6 +200,7 @@ mod tests {
                 "~/.aws".to_string(),
                 "/etc".to_string(),
             ],
+            allow_local_overrides: false,
         }
     }
 
@@ -203,19 +209,28 @@ mod tests {
         let config = default_fence("/project");
         let home = dirs::home_dir().unwrap();
         let ssh_path = format!("{}/.ssh/authorized_keys", home.display());
-        assert!(matches!(check_path(&config, &ssh_path, "/project"), PathCheck::Denied(_)));
+        assert!(matches!(
+            check_path(&config, &ssh_path, "/project"),
+            PathCheck::Denied(_)
+        ));
     }
 
     #[test]
     fn test_etc_blocked() {
         let config = default_fence("/project");
-        assert!(matches!(check_path(&config, "/etc/passwd", "/project"), PathCheck::Denied(_)));
+        assert!(matches!(
+            check_path(&config, "/etc/passwd", "/project"),
+            PathCheck::Denied(_)
+        ));
     }
 
     #[test]
     fn test_project_path_allowed() {
         let config = default_fence("/project");
-        assert_eq!(check_path(&config, "/project/src/main.rs", "/project"), PathCheck::Allow);
+        assert_eq!(
+            check_path(&config, "/project/src/main.rs", "/project"),
+            PathCheck::Allow
+        );
     }
 
     #[test]
@@ -224,8 +239,12 @@ mod tests {
             enabled: false,
             allowed_paths: vec![],
             denied_paths: vec!["/etc".to_string()],
+            allow_local_overrides: false,
         };
-        assert_eq!(check_path(&config, "/etc/passwd", "/project"), PathCheck::Allow);
+        assert_eq!(
+            check_path(&config, "/etc/passwd", "/project"),
+            PathCheck::Allow
+        );
     }
 
     #[test]
@@ -234,8 +253,12 @@ mod tests {
             enabled: true,
             allowed_paths: vec![],
             denied_paths: vec![],
+            allow_local_overrides: false,
         };
-        assert!(matches!(check_path(&config, "/other/file.txt", "/project"), PathCheck::OutsideProject(_)));
+        assert!(matches!(
+            check_path(&config, "/other/file.txt", "/project"),
+            PathCheck::OutsideProject(_)
+        ));
     }
 
     #[test]
@@ -244,10 +267,20 @@ mod tests {
             enabled: true,
             allowed_paths: vec!["/project".to_string(), "/tmp".to_string()],
             denied_paths: vec![],
+            allow_local_overrides: false,
         };
-        assert_eq!(check_path(&config, "/project/src/main.rs", "/project"), PathCheck::Allow);
-        assert_eq!(check_path(&config, "/tmp/test.txt", "/project"), PathCheck::Allow);
-        assert!(matches!(check_path(&config, "/other/file.txt", "/project"), PathCheck::OutsideProject(_)));
+        assert_eq!(
+            check_path(&config, "/project/src/main.rs", "/project"),
+            PathCheck::Allow
+        );
+        assert_eq!(
+            check_path(&config, "/tmp/test.txt", "/project"),
+            PathCheck::Allow
+        );
+        assert!(matches!(
+            check_path(&config, "/other/file.txt", "/project"),
+            PathCheck::OutsideProject(_)
+        ));
     }
 
     #[test]
@@ -257,10 +290,40 @@ mod tests {
             enabled: true,
             allowed_paths: vec!["/tmp".to_string()],
             denied_paths: vec![],
+            allow_local_overrides: false,
         };
-        assert_eq!(check_path(&config, "/project/src/main.rs", "/project"), PathCheck::Allow);
-        assert_eq!(check_path(&config, "/tmp/test.txt", "/project"), PathCheck::Allow);
-        assert!(matches!(check_path(&config, "/other/file.txt", "/project"), PathCheck::OutsideProject(_)));
+        assert_eq!(
+            check_path(&config, "/project/src/main.rs", "/project"),
+            PathCheck::Allow
+        );
+        assert_eq!(
+            check_path(&config, "/tmp/test.txt", "/project"),
+            PathCheck::Allow
+        );
+        assert!(matches!(
+            check_path(&config, "/other/file.txt", "/project"),
+            PathCheck::OutsideProject(_)
+        ));
+    }
+
+    #[test]
+    fn test_allowed_path_matches_deep_descendant() {
+        // Issue #16: a path nested several levels under an allowed_paths entry
+        // (e.g. the repo root under `~/github`) must be allowed, not prompted.
+        let config = FenceConfig {
+            enabled: true,
+            allowed_paths: vec!["/home/u/github".to_string()],
+            denied_paths: vec![],
+            allow_local_overrides: false,
+        };
+        assert_eq!(
+            check_path(&config, "/home/u/github/railguard/src/main.rs", "/project"),
+            PathCheck::Allow
+        );
+        assert!(matches!(
+            check_path(&config, "/home/u/other/file.txt", "/project"),
+            PathCheck::OutsideProject(_)
+        ));
     }
 
     #[test]

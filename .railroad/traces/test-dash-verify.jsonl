@@ -1,1 +1,0 @@
-{"timestamp":"2026-03-10T23:53:57.120763+00:00","session_id":"test-dash-verify","event":"PreToolUse","tool":"Bash","input_summary":"echo hello","decision":"allow","duration_ms":13}

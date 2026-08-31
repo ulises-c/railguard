@@ -151,6 +151,14 @@ pub struct FenceConfig {
     pub allowed_paths: Vec<String>,
     #[serde(default)]
     pub denied_paths: Vec<String>,
+    /// When true, a project-local `.railguard.local.yaml` may *add* to
+    /// `allowed_paths` (never remove denies). On by default: overrides are
+    /// additive-only and denied_paths always win, so a hostile repo can widen
+    /// reads/writes outside its own tree but never reach denied paths. Edits
+    /// to any railguard yaml are approval-gated. Set false to require the
+    /// human's base policy to opt each machine in.
+    #[serde(default = "default_true")]
+    pub allow_local_overrides: bool,
 }
 
 impl Default for FenceConfig {
@@ -166,6 +174,7 @@ impl Default for FenceConfig {
                 "~/.claude".to_string(),
                 "/etc".to_string(),
             ],
+            allow_local_overrides: true,
         }
     }
 }
@@ -237,8 +246,9 @@ pub struct MemoryConfig {
     pub append_only: bool,
     #[serde(default = "default_true")]
     pub verify_on_read: bool,
-    /// Let agents delete memory files with Bash (rm/unlink). Off by default:
-    /// memory stays append-only unless the human opts in via railguard.yaml.
+    /// Let agents delete or move individual memory files with Bash without
+    /// the approval prompt. Off by default. Container roots (all of ~/.claude
+    /// or ~/.claude/projects) stay blocked regardless.
     #[serde(default)]
     pub allow_delete: bool,
 }

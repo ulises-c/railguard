@@ -99,8 +99,9 @@ A benign-path whitelist (`is_benign_path()`) prevents false positives on system 
 
 #### Default Rules (`defaults.rs`)
 
-Built-in rules (29 total):
-- Destructive commands: `terraform destroy`, `rm -rf /`, `DROP TABLE`, `git push --force`, `git reset --hard`, `git clean -f`, `drizzle-kit push --force`, `mkfs`/`dd`, `kubectl delete namespace`, `aws s3 rm --recursive`, `docker system prune -a`, `chmod -R 777 /`
+Built-in rules include:
+- Hard blocks: `terraform destroy`, exact filesystem/home-root deletion, `DROP TABLE`, `git push --force`, `git reset --hard`, `drizzle-kit push --force`, `mkfs`/`dd`, `kubectl delete namespace`, `aws s3 rm --recursive`, `chmod -R 777 /`
+- Approval-gated local pruning: recursive force deletion below a home root, `git clean -f`, forced worktree removal, Docker system/volume/broad builder pruning
 - Approval-gated: `npm publish`
 - Self-protection: `railguard uninstall`, `.claude/settings.json` tampering, railguard binary removal
 - Network: `curl | sh`, netcat, `curl POST` (approve), `wget` (approve), `ssh`/`scp` (approve)
@@ -331,7 +332,15 @@ Claude Code                           Railguard Process
     |                                    -> First time: warn, continue
     |                                    -> Second time: deny + terminate
     |                                      |
-    |                              8. PATH FENCE CHECK:
+    |                              8. HARD POLICY + MEMORY CHECKS:
+    |                                 a. Hard policy block wins before any
+    |                                    outside-project approval prompt
+    |                                 b. Claude state/memory container-root
+    |                                    deletion is always blocked
+    |                                 c. Project memory deletion snapshots
+    |                                    affected files, then asks
+    |                                      |
+    |                              9. PATH FENCE CHECK:
     |                                 a. extract_paths_from_command()
     |                                    (handles variable indirection)
     |                                 b. For each path: check_path()
@@ -342,7 +351,7 @@ Claude Code                           Railguard Process
     |                                    - Check within project directory
     |                                 -> If denied: deny + save state
     |                                      |
-    |                              9. POLICY EVALUATION:
+    |                             10. REMAINING POLICY DECISION:
     |                                 a. evaluate(policy, "Bash", tool_input)
     |                                    i.  Allowlist check -> allow
     |                                    ii. Blocklist check -> deny
@@ -352,7 +361,7 @@ Claude Code                           Railguard Process
     |                                    produces decoded variants,
     |                                    each tested against rule regex
     |                                      |
-    |                             10. ON ALLOW:
+    |                             11. ON ALLOW:
     |                                 a. If tool is Write/Edit and
     |                                    snapshot.enabled:
     |                                    capture_snapshot() ->
@@ -362,7 +371,7 @@ Claude Code                           Railguard Process
     |                                 c. Save SessionState to disk
     |                                 d. Write HookOutput (empty) to stdout
     |                                      |
-    |                             11. ON BLOCK:
+    |                             12. ON BLOCK:
     |                                 a. Record block in SessionState
     |                                    (for Tier 3 behavioral tracking)
     |                                 b. Save SessionState to disk
@@ -370,13 +379,13 @@ Claude Code                           Railguard Process
     |                                 d. Write HookOutput with
     |                                    permissionDecision: "deny"
     |                                      |
-    |                             12. ON APPROVE:
+    |                             13. ON APPROVE:
     |                                 a. Save SessionState to disk
     |                                 b. Log trace entry
     |                                 c. Write HookOutput with
     |                                    permissionDecision: "ask"
     |                                      |
-    |                             13. ON TERMINATE:
+    |                             14. ON TERMINATE:
     |                                 a. Flush deny JSON to stdout
     |                                 b. Mark SessionState terminated
     |                                 c. Write forensic breadcrumb to trace
@@ -443,7 +452,8 @@ snapshot:
 
 | Feature | Default |
 |---|---|
-| Destructive commands | Approve (user decides) |
+| Catastrophic, remote, and data-destructive commands | Block |
+| Broad local pruning | Approve (user decides) |
 | Self-protection (anti-uninstall) | Block (always) |
 | Path fencing | On by default |
 | Network policy | curl\|sh blocked, POST/wget/ssh require approval |

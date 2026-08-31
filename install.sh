@@ -1,10 +1,16 @@
 #!/bin/sh
 # install.sh — Installer for railguard
-# Usage: curl -fsSL https://raw.githubusercontent.com/railguard-dev/railguard/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/ulises-c/railguard/main/install.sh | sh
 set -e
 
-REPO="railguard-dev/railguard"
+REPO="ulises-c/railguard"
 BINARY="railguard"
+
+# Directory containing this script (the local checkout root)
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+# First arg selects the install mode: "local" builds from this checkout
+MODE="${1:-}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -127,6 +133,23 @@ build_from_source() {
 }
 
 # ---------------------------------------------------------------------------
+# Build from the local checkout (this repo) instead of upstream
+# ---------------------------------------------------------------------------
+
+build_local() {
+    if ! command -v cargo >/dev/null 2>&1; then
+        err "cargo is required to build from source. Install Rust first: https://rustup.rs"
+    fi
+    if [ ! -f "${SCRIPT_DIR}/Cargo.toml" ]; then
+        err "No Cargo.toml found in ${SCRIPT_DIR} — run this from the railguard checkout"
+    fi
+    info "Building from local checkout: ${SCRIPT_DIR}"
+    info "Running: cargo install --path ${SCRIPT_DIR} --force"
+    cargo install --path "$SCRIPT_DIR" --force
+    ok "Built and installed ${BINARY} from local source"
+}
+
+# ---------------------------------------------------------------------------
 # Post-install: register hooks
 # ---------------------------------------------------------------------------
 
@@ -151,11 +174,19 @@ post_install() {
 main() {
     printf "\n\033[1m  Railguard Installer\033[0m\n\n"
 
-    detect_platform
-    info "Detected platform: ${TARGET}"
-
     pick_install_dir
     info "Install directory: ${INSTALL_DIR}"
+
+    if [ "$MODE" = "local" ]; then
+        info "Mode: local (building from this checkout)"
+        build_local
+        post_install
+        printf "\n\033[1m  Done!\033[0m Run \033[1mrailguard --help\033[0m to get started.\n\n"
+        return
+    fi
+
+    detect_platform
+    info "Detected platform: ${TARGET}"
 
     INSTALLED=0
     if fetch_latest_version; then

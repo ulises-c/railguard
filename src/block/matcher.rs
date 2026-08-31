@@ -91,10 +91,11 @@ pub fn evaluate_tool(tool_name: &str, tool_input: &serde_json::Value, rules: &[R
                     };
                 }
             }
+            return Decision::Allow;
         }
     }
 
-    // For any tool, serialize the entire input and match
+    // For tools without dedicated handling, serialize the entire input and match
     let input_str = serde_json::to_string(tool_input).unwrap_or_default();
     for rule in &applicable_rules {
         if rule.tool != "*" && rule.tool != tool_name {
@@ -184,6 +185,37 @@ mod tests {
         }];
         let input = json!({"file_path": "/home/user/.ssh/authorized_keys", "content": "key"});
         let decision = evaluate_tool("Write", &input, &rules);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_write_content_mentioning_pattern_allowed() {
+        let rules = vec![Rule {
+            name: "railguard-config-edit".to_string(),
+            tool: "Write".to_string(),
+            pattern: r"railguard\.yaml".to_string(),
+            action: "approve".to_string(),
+            message: None,
+        }];
+        let input = json!({
+            "file_path": "/tmp/notes.md",
+            "content": "the allowed_paths workaround in railguard.yaml can be dropped"
+        });
+        let decision = evaluate_tool("Write", &input, &rules);
+        assert!(matches!(decision, Decision::Allow));
+    }
+
+    #[test]
+    fn test_unhandled_tool_matches_serialized_input() {
+        let rules = vec![Rule {
+            name: "no-internal-fetch".to_string(),
+            tool: "WebFetch".to_string(),
+            pattern: r"internal\.example\.com".to_string(),
+            action: "block".to_string(),
+            message: None,
+        }];
+        let input = json!({"url": "https://internal.example.com/secrets"});
+        let decision = evaluate_tool("WebFetch", &input, &rules);
         assert!(matches!(decision, Decision::Block { .. }));
     }
 

@@ -57,7 +57,10 @@ pub fn terminate_session(
     eprintln!();
     eprintln!("  Review what happened:");
     eprintln!("    railguard log --session {}", state.session_id);
-    eprintln!("    railguard context --session {} --verbose", state.session_id);
+    eprintln!(
+        "    railguard context --session {} --verbose",
+        state.session_id
+    );
     eprintln!();
 
     // 4. Kill parent process (Claude Code)

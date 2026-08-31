@@ -41,18 +41,13 @@ pub fn enable_bypass_permissions() -> Result<String, String> {
         .as_object_mut()
         .ok_or("Settings is not a JSON object")?;
 
-    let permissions = root
-        .entry("permissions")
-        .or_insert_with(|| json!({}));
+    let permissions = root.entry("permissions").or_insert_with(|| json!({}));
 
     let perms_obj = permissions
         .as_object_mut()
         .ok_or("permissions is not a JSON object")?;
 
-    perms_obj.insert(
-        "defaultMode".to_string(),
-        json!("bypassPermissions"),
-    );
+    perms_obj.insert("defaultMode".to_string(), json!("bypassPermissions"));
 
     write_settings(&settings_path, &settings)?;
 
@@ -87,6 +82,26 @@ pub fn disable_bypass_permissions() -> Result<String, String> {
     Ok("Disabled bypass permissions mode".to_string())
 }
 
+/// True if a hooks-array entry invokes railguard.
+fn is_railguard_entry(entry: &Value) -> bool {
+    entry
+        .pointer("/hooks/0/command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c.contains("railguard"))
+}
+
+/// Add a railguard entry to an event's hook array, replacing any stale
+/// railguard entry but preserving user-added hooks.
+fn upsert_hook_entry(hooks_obj: &mut serde_json::Map<String, Value>, event: &str, entry: Value) {
+    let event_hooks = hooks_obj.entry(event).or_insert_with(|| json!([]));
+    if !event_hooks.is_array() {
+        *event_hooks = json!([]);
+    }
+    let arr = event_hooks.as_array_mut().unwrap();
+    arr.retain(|e| !is_railguard_entry(e));
+    arr.push(entry);
+}
+
 /// Install railguard hooks into Claude Code settings.
 pub fn install_hooks() -> Result<String, String> {
     let settings_path = claude_settings_path();
@@ -99,43 +114,19 @@ pub fn install_hooks() -> Result<String, String> {
         .entry("hooks")
         .or_insert_with(|| json!({}));
 
-    let hooks_obj = hooks
-        .as_object_mut()
-        .ok_or("hooks is not a JSON object")?;
+    let hooks_obj = hooks.as_object_mut().ok_or("hooks is not a JSON object")?;
 
-    // PreToolUse hook — blocks/approves/traces before execution
-    let pre_hook = json!([{
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} hook --event PreToolUse", binary),
-            "timeout": 5
-        }]
-    }]);
-
-    // PostToolUse hook — traces results, captures snapshots
-    let post_hook = json!([{
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} hook --event PostToolUse", binary),
-            "timeout": 5
-        }]
-    }]);
-
-    // SessionStart hook — initializes session logging
-    let session_hook = json!([{
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} hook --event SessionStart", binary),
-            "timeout": 5
-        }]
-    }]);
-
-    hooks_obj.insert("PreToolUse".to_string(), pre_hook);
-    hooks_obj.insert("PostToolUse".to_string(), post_hook);
-    hooks_obj.insert("SessionStart".to_string(), session_hook);
+    for event in ["PreToolUse", "PostToolUse", "SessionStart"] {
+        let entry = json!({
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": format!("{} hook --event {}", binary, event),
+                "timeout": 5
+            }]
+        });
+        upsert_hook_entry(hooks_obj, event, entry);
+    }
 
     // Set CLAUDE_CODE_SHELL to railguard-shell for OS-level sandboxing.
     // This makes every Bash tool call run through our sandboxed shell.
@@ -148,10 +139,7 @@ pub fn install_hooks() -> Result<String, String> {
             .or_insert_with(|| json!({}));
 
         if let Some(env_map) = env_obj.as_object_mut() {
-            env_map.insert(
-                "CLAUDE_CODE_SHELL".to_string(),
-                json!(shell_binary),
-            );
+            env_map.insert("CLAUDE_CODE_SHELL".to_string(), json!(shell_binary));
         }
     }
 
@@ -175,6 +163,54 @@ pub fn install_hooks() -> Result<String, String> {
     ))
 }
 
+/// Insert or replace the railguard section in CLAUDE.md `existing` content,
+/// returning the full new file contents (with trailing newline). User content
+/// before/after the markers is preserved and separated from the section by a
+/// blank line, so the start marker never fuses onto a user's line.
+fn upsert_railguard_section(existing: &str, marked_content: &str) -> String {
+    if existing.contains(CLAUDE_MD_MARKER_START) {
+        let before = existing
+            .split(CLAUDE_MD_MARKER_START)
+            .next()
+            .unwrap_or("")
+            .trim_end();
+        let after = existing.split(CLAUDE_MD_MARKER_END).nth(1).unwrap_or("");
+        let separator = if before.is_empty() { "" } else { "\n\n" };
+        let updated = format!("{}{}{}{}", before, separator, marked_content, after);
+        return updated.trim().to_string() + "\n";
+    }
+    let before = existing.trim_end();
+    if before.is_empty() {
+        format!("{}\n", marked_content)
+    } else {
+        format!("{}\n\n{}\n", before, marked_content)
+    }
+}
+
+/// Strip the railguard section from CLAUDE.md `content`, rejoining surrounding
+/// user content with a blank line. Returns `None` if no section marker present.
+fn strip_railguard_section(content: &str) -> Option<String> {
+    if !content.contains(CLAUDE_MD_MARKER_START) {
+        return None;
+    }
+    let before = content
+        .split(CLAUDE_MD_MARKER_START)
+        .next()
+        .unwrap_or("")
+        .trim_end();
+    let after = content
+        .split(CLAUDE_MD_MARKER_END)
+        .nth(1)
+        .unwrap_or("")
+        .trim_start();
+    let cleaned = if before.is_empty() || after.is_empty() {
+        format!("{}{}", before, after)
+    } else {
+        format!("{}\n\n{}", before, after)
+    };
+    Some(cleaned.trim().to_string() + "\n")
+}
+
 /// Inject Railguard instructions into the user's CLAUDE.md file.
 /// This teaches Claude Code about rollback, context, and what's blocked.
 fn inject_claude_md() -> Result<String, String> {
@@ -189,31 +225,16 @@ fn inject_claude_md() -> Result<String, String> {
     if claude_md_path.exists() {
         let existing = fs::read_to_string(&claude_md_path)
             .map_err(|e| format!("Failed to read CLAUDE.md: {}", e))?;
-
-        if existing.contains(CLAUDE_MD_MARKER_START) {
-            // Replace existing railguard section
-            let before = existing
-                .split(CLAUDE_MD_MARKER_START)
-                .next()
-                .unwrap_or("");
-            let after = existing
-                .split(CLAUDE_MD_MARKER_END)
-                .nth(1)
-                .unwrap_or("");
-
-            let updated = format!("{}{}{}", before.trim_end(), marked_content, after);
-            fs::write(&claude_md_path, updated.trim().to_string() + "\n")
-                .map_err(|e| format!("Failed to update CLAUDE.md: {}", e))?;
-
-            return Ok("Updated Railguard instructions in ~/.claude/CLAUDE.md".to_string());
-        }
-
-        // Append to existing file
-        let updated = format!("{}\n\n{}\n", existing.trim_end(), marked_content);
+        let had_section = existing.contains(CLAUDE_MD_MARKER_START);
+        let updated = upsert_railguard_section(&existing, &marked_content);
         fs::write(&claude_md_path, updated)
             .map_err(|e| format!("Failed to update CLAUDE.md: {}", e))?;
 
-        Ok("Added Railguard instructions to ~/.claude/CLAUDE.md".to_string())
+        Ok(if had_section {
+            "Updated Railguard instructions in ~/.claude/CLAUDE.md".to_string()
+        } else {
+            "Added Railguard instructions to ~/.claude/CLAUDE.md".to_string()
+        })
     } else {
         // Create new file
         if let Some(parent) = claude_md_path.parent() {
@@ -233,9 +254,11 @@ pub fn uninstall_hooks() -> Result<String, String> {
     // Check if running interactively (a TTY is attached)
     // Agents pipe stdin, so this catches most automated attempts
     if !is_interactive_terminal() {
-        return Err("Railguard can only be uninstalled from an interactive terminal.\n  \
+        return Err(
+            "Railguard can only be uninstalled from an interactive terminal.\n  \
                     This prevents AI agents from removing their own guardrails."
-            .to_string());
+                .to_string(),
+        );
     }
 
     // Show native OS confirmation dialog — requires a real human to click through
@@ -256,13 +279,7 @@ pub fn uninstall_hooks() -> Result<String, String> {
         for event in &["PreToolUse", "PostToolUse", "SessionStart"] {
             if let Some(event_hooks) = hooks.get_mut(*event) {
                 if let Some(arr) = event_hooks.as_array_mut() {
-                    arr.retain(|entry| {
-                        let is_railguard = entry
-                            .pointer("/hooks/0/command")
-                            .and_then(|c| c.as_str())
-                            .is_some_and(|c| c.contains("railguard"));
-                        !is_railguard
-                    });
+                    arr.retain(|entry| !is_railguard_entry(entry));
                     if arr.is_empty() {
                         hooks.remove(*event);
                     }
@@ -306,18 +323,8 @@ fn remove_claude_md_section() {
     }
 
     if let Ok(content) = fs::read_to_string(&claude_md_path) {
-        if content.contains(CLAUDE_MD_MARKER_START) {
-            let before = content
-                .split(CLAUDE_MD_MARKER_START)
-                .next()
-                .unwrap_or("");
-            let after = content
-                .split(CLAUDE_MD_MARKER_END)
-                .nth(1)
-                .unwrap_or("");
-
-            let cleaned = format!("{}{}", before.trim_end(), after.trim_start());
-            let _ = fs::write(&claude_md_path, cleaned.trim().to_string() + "\n");
+        if let Some(cleaned) = strip_railguard_section(&content) {
+            let _ = fs::write(&claude_md_path, cleaned);
         }
     }
 }
@@ -482,8 +489,7 @@ fn read_settings(path: &Path) -> Result<Value, String> {
 
 fn write_settings(path: &Path, settings: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create settings dir: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create settings dir: {}", e))?;
     }
 
     let content = serde_json::to_string_pretty(settings)
@@ -503,5 +509,109 @@ mod tests {
         let path = claude_settings_path();
         assert!(path.to_str().unwrap().contains(".claude"));
         assert!(path.to_str().unwrap().ends_with("settings.json"));
+    }
+
+    fn marked() -> String {
+        format!(
+            "{}\n{}\n{}",
+            CLAUDE_MD_MARKER_START, "RAILGUARD BODY", CLAUDE_MD_MARKER_END
+        )
+    }
+
+    #[test]
+    fn upsert_replace_keeps_blank_line_before_marker() {
+        // Regression: reinstall must not fuse the user's last line onto the start marker.
+        let existing = format!(
+            "# Notes\nlast line\n\n{}\nOLD BODY\n{}\n",
+            CLAUDE_MD_MARKER_START, CLAUDE_MD_MARKER_END
+        );
+        let out = upsert_railguard_section(&existing, &marked());
+        assert!(
+            out.contains(&format!("last line\n\n{}", CLAUDE_MD_MARKER_START)),
+            "expected blank line before marker, got:\n{out}"
+        );
+        assert!(!out.contains(&format!("last line{}", CLAUDE_MD_MARKER_START)));
+        assert!(out.contains("RAILGUARD BODY") && !out.contains("OLD BODY"));
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn upsert_replace_is_idempotent() {
+        let existing = format!(
+            "# Notes\nlast line\n\n{}\nOLD\n{}\n",
+            CLAUDE_MD_MARKER_START, CLAUDE_MD_MARKER_END
+        );
+        let once = upsert_railguard_section(&existing, &marked());
+        let twice = upsert_railguard_section(&once, &marked());
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn upsert_appends_with_blank_line_when_no_marker() {
+        let out = upsert_railguard_section("# Notes\nblah", &marked());
+        assert!(out.contains(&format!("blah\n\n{}", CLAUDE_MD_MARKER_START)));
+    }
+
+    #[test]
+    fn upsert_on_empty_has_no_leading_blank() {
+        let out = upsert_railguard_section("", &marked());
+        assert!(out.starts_with(CLAUDE_MD_MARKER_START));
+    }
+
+    #[test]
+    fn strip_rejoins_surrounding_content_without_fusing() {
+        let existing = format!(
+            "# Top\nA\n\n{}\nBODY\n{}\n\n# Bottom\nB\n",
+            CLAUDE_MD_MARKER_START, CLAUDE_MD_MARKER_END
+        );
+        let out = strip_railguard_section(&existing).unwrap();
+        assert!(!out.contains(CLAUDE_MD_MARKER_START) && !out.contains(CLAUDE_MD_MARKER_END));
+        assert!(out.contains("A\n\n# Bottom"), "got:\n{out}");
+        assert!(!out.contains("AB") && !out.contains("A# Bottom"));
+    }
+
+    #[test]
+    fn strip_returns_none_without_marker() {
+        assert!(strip_railguard_section("# Just user notes\n").is_none());
+    }
+
+    #[test]
+    fn upsert_hook_preserves_user_hooks_and_replaces_stale_railguard() {
+        let mut hooks = json!({
+            "PreToolUse": [
+                {"matcher": "", "hooks": [{"type": "command", "command": "my-custom-linter"}]},
+                {"matcher": "", "hooks": [{"type": "command", "command": "/old/path/railguard hook --event PreToolUse"}]}
+            ]
+        });
+        let hooks_obj = hooks.as_object_mut().unwrap();
+        let entry = json!({"matcher": "", "hooks": [{"type": "command", "command": "/new/railguard hook --event PreToolUse"}]});
+        upsert_hook_entry(hooks_obj, "PreToolUse", entry);
+
+        let arr = hooks_obj["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "got: {arr:?}");
+        assert!(arr
+            .iter()
+            .any(|e| e.pointer("/hooks/0/command").unwrap() == "my-custom-linter"));
+        assert!(arr
+            .iter()
+            .any(|e| e.pointer("/hooks/0/command").unwrap()
+                == "/new/railguard hook --event PreToolUse"));
+        assert!(!arr.iter().any(|e| {
+            e.pointer("/hooks/0/command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| c.starts_with("/old/"))
+        }));
+    }
+
+    #[test]
+    fn upsert_hook_creates_event_when_missing() {
+        let mut hooks = json!({});
+        let hooks_obj = hooks.as_object_mut().unwrap();
+        upsert_hook_entry(
+            hooks_obj,
+            "SessionStart",
+            json!({"matcher": "", "hooks": [{"type": "command", "command": "railguard hook --event SessionStart"}]}),
+        );
+        assert_eq!(hooks_obj["SessionStart"].as_array().unwrap().len(), 1);
     }
 }

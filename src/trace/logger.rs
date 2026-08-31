@@ -4,12 +4,33 @@ use std::path::{Path, PathBuf};
 
 use crate::types::TraceEntry;
 
-/// Return the global trace directory: ~/.railguard/traces
-pub fn global_trace_dir() -> PathBuf {
+/// Root for all global railguard state: ~/.railguard by default.
+///
+/// In debug builds only, honors the `RAILGUARD_HOME` env var so the test suite
+/// can redirect global writes (traces, sessions, locks) to a tempdir instead of
+/// polluting the real home. Release builds — what users install — ALWAYS resolve
+/// from the home dir and ignore the env var, so the global audit log cannot be
+/// relocated by an injected environment.
+pub fn railguard_home() -> PathBuf {
+    #[cfg(debug_assertions)]
+    if let Ok(dir) = std::env::var("RAILGUARD_HOME") {
+        return PathBuf::from(dir);
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".railguard")
-        .join("traces")
+}
+
+/// Return the global trace directory: ~/.railguard/traces
+pub fn global_trace_dir() -> PathBuf {
+    railguard_home().join("traces")
+}
+
+/// Global, cwd-independent registry mapping session_id → project root:
+/// ~/.railguard/sessions. Lets the path fence and policy recover a session's
+/// stable anchor even when the per-call cwd has drifted outside the project.
+pub fn global_sessions_dir() -> PathBuf {
+    railguard_home().join("sessions")
 }
 
 /// Append a trace entry to the session log file.

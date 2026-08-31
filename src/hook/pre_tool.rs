@@ -34,11 +34,35 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
     let tool_input = input.tool_input.clone().unwrap_or_default();
     let cwd = Path::new(&input.cwd);
 
-    // Load persistent session state
-    let state_dir = cwd.join(".railguard/state");
+    // Load persistent session state (walk up — the shell cwd persists across
+    // tool calls and may have drifted below the project root)
+    let state_dir = SessionState::locate_state_dir(cwd, &input.session_id);
     let mut state = SessionState::load(&state_dir, &input.session_id);
     state.resolve_pending_approval();
     state.increment_tool_call();
+
+    // The fence anchors to the session's stable project root, not the per-call
+    // cwd. Resolve via the shared anchor (cwd-walked state → global pointer →
+    // git ancestor → cwd) so a cwd that drifted outside the project subtree
+    // still recovers the right root.
+    let sessions_dir = crate::trace::logger::global_sessions_dir();
+    let (resolved_root, root_source) =
+        SessionState::resolve_project_root_with_source(cwd, &input.session_id, &sessions_dir);
+    let fence_root = resolved_root.display().to_string();
+    // Only persist a TRUSTWORTHY root (existing state/pointer, or a real .git
+    // ancestor). A bare-cwd fallback — a session whose first call already drifted
+    // outside any repo — must not be persisted, or that wrong root would stick
+    // for the whole session. For a trustworthy root, (re)write the pointer every
+    // call so its mtime tracks live activity and cleanup_old_pointers never reaps
+    // a long-running session's anchor.
+    if root_source.is_trustworthy() {
+        state.project_root.get_or_insert_with(|| fence_root.clone());
+        SessionState::write_global_pointer(
+            &sessions_dir,
+            &input.session_id,
+            Path::new(&fence_root),
+        );
+    }
 
     // If session was previously terminated, ask user before resuming
     if state.terminated {
@@ -100,8 +124,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             if state.is_approved(&pattern_key) {
                 // User already approved this pattern this session — allow
                 log_decision(
-                    input, policy, tool_name, &tool_input,
-                    "allow", Some("session-approved"), start,
+                    input,
+                    policy,
+                    tool_name,
+                    &tool_input,
+                    "allow",
+                    Some("session-approved"),
+                    start,
                 );
                 let _ = state.save(&state_dir);
                 return PreToolResult {
@@ -140,8 +169,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
 
                     if state.is_approved(&pattern_key) {
                         log_decision(
-                            input, policy, tool_name, &tool_input,
-                            "allow", Some("session-approved"), start,
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "allow",
+                            Some("session-approved"),
+                            start,
                         );
                         let _ = state.save(&state_dir);
                         let _ = state.save(&state_dir);
@@ -180,8 +214,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
 
                     if state.is_approved(&pattern_key) {
                         log_decision(
-                            input, policy, tool_name, &tool_input,
-                            "allow", Some("session-approved"), start,
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "allow",
+                            Some("session-approved"),
+                            start,
                         );
                         let _ = state.save(&state_dir);
                         return PreToolResult {
@@ -215,8 +254,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         // First occurrence: warn and continue to policy evaluation
                         state.record_warning();
                         log_decision(
-                            input, policy, tool_name, &tool_input,
-                            "warn", Some(&pattern_key), start,
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "warn",
+                            Some(&pattern_key),
+                            start,
                         );
                     }
                 }
@@ -228,24 +272,89 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
         }
     }
 
+    // Evaluate hard policy blocks before the path fence. An outside-project
+    // prompt must never downgrade a command that policy says is forbidden.
+    let mut decision = evaluate(policy, tool_name, &tool_input);
+    if tool_name == "Bash" {
+        if let Decision::Block { rule, .. } = &decision {
+            // The built-in settings tamper rule exists to stop writes to
+            // Claude Code settings; a provably read-only command may inspect
+            // them. The path fence still applies afterwards.
+            if rule == "railguard-tamper-settings" && is_read_only_settings_access(&command) {
+                decision = Decision::Allow;
+            }
+        }
+    }
+    if let Decision::Block { rule, message } = &decision {
+        if tool_name == "Bash" && !command.is_empty() {
+            let keywords = extract_keywords(&command);
+            state.record_block(&command, rule, keywords, 0);
+        }
+        let _ = state.save(&state_dir);
+        log_decision(
+            input,
+            policy,
+            tool_name,
+            &tool_input,
+            "block",
+            Some(rule),
+            start,
+        );
+        return PreToolResult {
+            output: HookOutput::deny(&format!("⛔ Railguard BLOCKED: {}", message)),
+            terminate: None,
+        };
+    }
+
     // === MEMORY GUARD (before path fence, since ~/.claude is denied) ===
+
+    if tool_name == "Bash" && memory_guard::is_memory_delete_command(&command) {
+        let paths = evasion::extract_paths_from_command(&command);
+        if paths
+            .iter()
+            .any(|path| memory_guard::is_memory_container_root(path))
+        {
+            let _ = state.save(&state_dir);
+            log_decision(
+                input,
+                policy,
+                tool_name,
+                &tool_input,
+                "block",
+                Some("memory-container-root"),
+                start,
+            );
+            return PreToolResult {
+                output: HookOutput::deny(
+                    "⛔ Railguard: Memory Safety: deleting ~/.claude or ~/.claude/projects is blocked.",
+                ),
+                terminate: None,
+            };
+        }
+    }
 
     if policy.memory.enabled {
         // For Bash commands, check if they touch memory paths
-        let memory_file_path = if tool_name == "Bash" {
+        let memory_file_paths: Vec<String> = if tool_name == "Bash" {
             tool_input
                 .get("command")
                 .and_then(|v| v.as_str())
-                .and_then(|cmd| {
+                .map(|cmd| {
                     let paths = evasion::extract_paths_from_command(cmd);
-                    paths.into_iter().find(|p| memory_guard::is_memory_path(p))
+                    paths
+                        .into_iter()
+                        .filter(|path| memory_guard::is_memory_path(path))
+                        .collect()
                 })
+                .unwrap_or_default()
         } else {
             extract_file_path(tool_name, &tool_input)
-                .filter(|p| memory_guard::is_memory_path(p))
+                .filter(|path| memory_guard::is_memory_path(path))
+                .into_iter()
+                .collect()
         };
 
-        if let Some(ref mem_path) = memory_file_path {
+        if let Some(mem_path) = memory_file_paths.first() {
             let result = memory_guard::check_memory_write(
                 &policy.memory,
                 tool_name,
@@ -258,8 +367,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 MemoryDecision::Allow => {
                     // Memory guard approved — skip path fence for this path
                     log_decision(
-                        input, policy, tool_name, &tool_input, "allow",
-                        Some("memory-guard"), start,
+                        input,
+                        policy,
+                        tool_name,
+                        &tool_input,
+                        "allow",
+                        Some("memory-guard"),
+                        start,
                     );
                     let _ = state.save(&state_dir);
 
@@ -267,10 +381,21 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                     if policy.snapshot.enabled
                         && policy.snapshot.tools.iter().any(|t| t == tool_name)
                     {
-                        if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-                            let snap_dir = cwd.join(&policy.snapshot.directory);
+                        if let Some(file_path) =
+                            tool_input.get("file_path").and_then(|v| v.as_str())
+                        {
+                            // Anchor snapshots at the stable fence_root, not the
+                            // per-call cwd: `railguard rollback` reads them from
+                            // the project root, so a cwd-drifted Write/Edit's
+                            // backup must still land under the project.
+                            let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
                             let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
-                            let _ = capture_snapshot(&snap_dir, &input.session_id, tool_use_id, file_path);
+                            let _ = capture_snapshot(
+                                &snap_dir,
+                                &input.session_id,
+                                tool_use_id,
+                                file_path,
+                            );
                         }
                     }
 
@@ -282,8 +407,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 MemoryDecision::Block(reason) => {
                     let _ = state.save(&state_dir);
                     log_decision(
-                        input, policy, tool_name, &tool_input, "block",
-                        Some("memory-guard"), start,
+                        input,
+                        policy,
+                        tool_name,
+                        &tool_input,
+                        "block",
+                        Some("memory-guard"),
+                        start,
                     );
                     return PreToolResult {
                         output: HookOutput::deny(&format!("⛔ Railguard: {}", reason)),
@@ -291,10 +421,55 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                     };
                 }
                 MemoryDecision::Approve(reason) => {
+                    if tool_name == "Bash" && memory_guard::is_memory_delete_command(&command) {
+                        let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
+                        let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
+                        for path in &memory_file_paths {
+                            let files = match memory_guard::files_to_snapshot(path) {
+                                Ok(files) => files,
+                                Err(error) => {
+                                    return memory_snapshot_failure(
+                                        input,
+                                        policy,
+                                        tool_name,
+                                        &tool_input,
+                                        &mut state,
+                                        &state_dir,
+                                        start,
+                                        &error,
+                                    );
+                                }
+                            };
+                            for file in files {
+                                if let Err(error) = capture_snapshot(
+                                    &snap_dir,
+                                    &input.session_id,
+                                    tool_use_id,
+                                    &file,
+                                ) {
+                                    return memory_snapshot_failure(
+                                        input,
+                                        policy,
+                                        tool_name,
+                                        &tool_input,
+                                        &mut state,
+                                        &state_dir,
+                                        start,
+                                        &error,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     let _ = state.save(&state_dir);
                     log_decision(
-                        input, policy, tool_name, &tool_input, "approve",
-                        Some("memory-guard"), start,
+                        input,
+                        policy,
+                        tool_name,
+                        &tool_input,
+                        "approve",
+                        Some("memory-guard"),
+                        start,
                     );
                     return PreToolResult {
                         output: HookOutput::ask(&format!(
@@ -302,7 +477,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                              \n\
                              {}\n\
                              \n\
-                             Railguard's memory guard requires approval for behavioral memory writes.",
+                             Railguard's memory guard requires approval for this memory change.",
                             reason
                         )),
                         terminate: None,
@@ -318,15 +493,20 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
         if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
             let paths = evasion::extract_paths_from_command(cmd);
             for path in &paths {
-                match check_path(&policy.fence, path, &input.cwd) {
+                match check_path(&policy.fence, path, &fence_root) {
                     PathCheck::Allow => {}
                     PathCheck::Denied(reason) => {
                         let keywords = extract_keywords(cmd);
                         state.record_block(cmd, "path-fence", keywords, 0);
                         let _ = state.save(&state_dir);
                         log_decision(
-                            input, policy, tool_name, &tool_input, "block",
-                            Some("path-fence"), start,
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "block",
+                            Some("path-fence"),
+                            start,
                         );
                         return PreToolResult {
                             output: HookOutput::deny(&reason),
@@ -334,13 +514,19 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                         };
                     }
                     PathCheck::OutsideProject(reason) => {
-                        if is_read_only_command(cmd) {
-                            // Read-only commands outside project are fine
+                        if is_read_only_command(cmd) || is_safe_worktree_removal(cmd) {
+                            // Read-only commands and Git-safe worktree removal
+                            // may operate outside the project without a prompt.
                         } else {
                             let _ = state.save(&state_dir);
                             log_decision(
-                                input, policy, tool_name, &tool_input, "approve",
-                                Some("path-fence"), start,
+                                input,
+                                policy,
+                                tool_name,
+                                &tool_input,
+                                "approve",
+                                Some("path-fence"),
+                                start,
                             );
                             return PreToolResult {
                                 output: HookOutput::ask(&format!(
@@ -360,13 +546,18 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             }
         }
     } else if let Some(file_path) = extract_file_path(tool_name, &tool_input) {
-        match check_path(&policy.fence, &file_path, &input.cwd) {
+        match check_path(&policy.fence, &file_path, &fence_root) {
             PathCheck::Allow => {}
             PathCheck::Denied(reason) => {
                 let _ = state.save(&state_dir);
                 log_decision(
-                    input, policy, tool_name, &tool_input, "block",
-                    Some("path-fence"), start,
+                    input,
+                    policy,
+                    tool_name,
+                    &tool_input,
+                    "block",
+                    Some("path-fence"),
+                    start,
                 );
                 return PreToolResult {
                     output: HookOutput::deny(&reason),
@@ -379,8 +570,13 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
                 } else {
                     let _ = state.save(&state_dir);
                     log_decision(
-                        input, policy, tool_name, &tool_input, "approve",
-                        Some("path-fence"), start,
+                        input,
+                        policy,
+                        tool_name,
+                        &tool_input,
+                        "approve",
+                        Some("path-fence"),
+                        start,
                     );
                     return PreToolResult {
                         output: HookOutput::ask(&format!(
@@ -400,15 +596,23 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
 
     // === POLICY EVALUATION (allowlist → blocklist → approve) ===
 
-    let decision = evaluate(policy, tool_name, &tool_input);
-
     match &decision {
         Decision::Allow => {
             // Coordination: acquire file lock for Write/Edit
             if matches!(tool_name, "Write" | "Edit") {
                 if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-                    if let Some(deny_msg) = crate::coord::context::check_file_conflict(file_path, &input.session_id) {
-                        log_decision(input, policy, tool_name, &tool_input, "block", Some("file-lock"), start);
+                    if let Some(deny_msg) =
+                        crate::coord::context::check_file_conflict(file_path, &input.session_id)
+                    {
+                        log_decision(
+                            input,
+                            policy,
+                            tool_name,
+                            &tool_input,
+                            "block",
+                            Some("file-lock"),
+                            start,
+                        );
                         let _ = state.save(&state_dir);
                         return PreToolResult {
                             output: HookOutput::deny(&deny_msg),
@@ -419,17 +623,17 @@ pub fn handle(input: &HookInput, policy: &Policy) -> PreToolResult {
             }
 
             // Snapshot before Write/Edit (if enabled)
-            if policy.snapshot.enabled
-                && policy.snapshot.tools.iter().any(|t| t == tool_name)
-            {
+            if policy.snapshot.enabled && policy.snapshot.tools.iter().any(|t| t == tool_name) {
                 if let Some(file_path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-                    let snap_dir = cwd.join(&policy.snapshot.directory);
+                    // Anchor snapshots at the stable fence_root (see above): keeps
+                    // backups under the project root that `railguard rollback` reads.
+                    let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
                     let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
                     if let Err(e) =
                         capture_snapshot(&snap_dir, &input.session_id, tool_use_id, file_path)
                     {
                         // silently ignore — stderr causes "hook error" in Claude Code
-let _ = e;
+                        let _ = e;
                     }
                 }
             }
@@ -449,7 +653,13 @@ let _ = e;
             }
             let _ = state.save(&state_dir);
             log_decision(
-                input, policy, tool_name, &tool_input, "block", Some(rule), start,
+                input,
+                policy,
+                tool_name,
+                &tool_input,
+                "block",
+                Some(rule),
+                start,
             );
             PreToolResult {
                 output: HookOutput::deny(&format!("⛔ Railguard BLOCKED: {}", message)),
@@ -463,7 +673,13 @@ let _ = e;
             // Tier 3 triggers on legitimate repeated commands (e.g. fly ssh).
             let _ = state.save(&state_dir);
             log_decision(
-                input, policy, tool_name, &tool_input, "approve", Some(rule), start,
+                input,
+                policy,
+                tool_name,
+                &tool_input,
+                "approve",
+                Some(rule),
+                start,
             );
             PreToolResult {
                 output: HookOutput::ask(&format!(
@@ -517,29 +733,189 @@ fn is_read_only_tool(tool_name: &str) -> bool {
     matches!(tool_name, "Read" | "Glob" | "Grep")
 }
 
-/// Returns true if a bash command is read-only (doesn't modify files).
+/// Returns true if a bash command is read-only (cannot create or modify files).
+///
+/// Used only to waive the path-fence *prompt*: a command that can't write
+/// outside the project shouldn't trigger an "approve?" on path-shaped text it
+/// merely contains (sed/awk regex addresses, jq's `//` operator, URLs).
+/// Reducing those false prompts is the point — prompt fatigue trains the human
+/// to rubber-stamp everything. Since extraction became shell-word-level
+/// (issue #17) most such text never reaches the fence; this waiver remains as
+/// second-line defense for words that are wholly path-shaped yet still data
+/// (a bare `'/foo/p'` sed program).
+///
+/// The check is conservative and inspects *every* segment of a compound
+/// command. Looking at only the first token let `cd repo && sed -n '/fn/p' f`
+/// slip through as non-read-only and get fenced on the `/fn` regex address.
+/// Denied-path access is evaluated separately and is NOT waived here, so a
+/// read of `~/.ssh` stays blocked regardless of this result.
 fn is_read_only_command(cmd: &str) -> bool {
-    let trimmed = cmd.trim_start();
-    // Get the first command token (before pipes, semicolons, &&, ||)
-    let first_token = trimmed
-        .split(|c: char| c.is_whitespace() || c == '|' || c == ';' || c == '&')
-        .next()
-        .unwrap_or("");
+    // An output redirect writes a file — never read-only. Checked up front so a
+    // navigation prefix can't launder it, e.g. `cd /tmp && echo x > ~/outside`.
+    if cmd.contains('>') {
+        return false;
+    }
 
+    // Only tools that inspect/read. A tool earns a spot here only if it cannot
+    // create or modify a file without a shell redirect — and redirects are
+    // already rejected by the `>` check above. Deliberately EXCLUDED, even
+    // though they are common in read-only invocations: interpreters (`python`,
+    // `node`, `ruby`), `go`/`rustc`, version control (`git`), and package
+    // managers (`cargo`, `npm`, `npx`, `yarn`, `pnpm`, `bun`), and `xargs`
+    // (it runs an arbitrary downstream command, e.g. `xargs rm`). Writing is a
+    // normal mode of operation for all of these and their read-vs-write intent
+    // cannot be told from the leading token (`git log` vs `git checkout`,
+    // `python -c "print(1)"` vs `python -c "open(p,'w')"`), so they must keep
+    // prompting when they name a path outside the project. Do not re-add them.
     const READ_ONLY_COMMANDS: &[&str] = &[
-        "find", "ls", "cat", "head", "tail", "less", "more", "wc",
-        "file", "stat", "du", "df", "which", "whereis", "type",
-        "grep", "rg", "ag", "ack", "fd", "tree", "realpath",
-        "readlink", "basename", "dirname", "diff", "md5", "shasum",
-        "sha256sum", "md5sum", "xxd", "hexdump", "strings",
-        "jq", "yq", "xargs", "sort", "uniq", "tr", "cut", "awk",
-        "sed", "pwd", "env", "printenv", "uname", "whoami", "id",
-        "date", "cal", "echo", "printf", "test", "[",
-        "git", "cargo", "npm", "npx", "yarn", "pnpm", "bun",
-        "node", "python", "python3", "ruby", "go", "rustc",
+        "find",
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "wc",
+        "file",
+        "stat",
+        "du",
+        "df",
+        "which",
+        "whereis",
+        "type",
+        "grep",
+        "rg",
+        "ag",
+        "ack",
+        "fd",
+        "tree",
+        "realpath",
+        "readlink",
+        "basename",
+        "dirname",
+        "diff",
+        "md5",
+        "shasum",
+        "sha256sum",
+        "md5sum",
+        "xxd",
+        "hexdump",
+        "strings",
+        "jq",
+        "yq",
+        "sort",
+        "uniq",
+        "tr",
+        "cut",
+        "awk",
+        "sed",
+        "pwd",
+        "env",
+        "printenv",
+        "uname",
+        "whoami",
+        "id",
+        "date",
+        "cal",
+        "echo",
+        "printf",
+        "test",
+        "[",
     ];
 
-    READ_ONLY_COMMANDS.contains(&first_token)
+    // Every segment of a compound command (`&&`, `||`, `;`, `|`) must itself be
+    // read-only. `cd`/`pushd`/`popd` are navigation and don't disqualify.
+    // (Split is connector-naive; a connector char inside a quoted program at
+    // worst yields a non-read-only verdict — more fencing, never less.)
+    cmd.split([';', '|', '&'])
+        .map(str::trim)
+        .filter(|seg| !seg.is_empty())
+        .all(|seg| {
+            let tok = seg.split(char::is_whitespace).next().unwrap_or("");
+            matches!(tok, "cd" | "pushd" | "popd")
+                || (READ_ONLY_COMMANDS.contains(&tok) && !has_write_mode(tok, seg))
+        })
+}
+
+fn has_write_mode(tool: &str, segment: &str) -> bool {
+    let args: Vec<_> = segment.split_whitespace().skip(1).collect();
+    match tool {
+        "find" => args
+            .iter()
+            .any(|arg| matches!(*arg, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")),
+        "sed" => args.iter().any(|arg| {
+            (arg.starts_with("-i") && !arg.starts_with("--"))
+                || *arg == "--in-place"
+                || arg.starts_with("--in-place=")
+        }),
+        "yq" => args.iter().any(|arg| matches!(*arg, "-i" | "--inplace")),
+        "sort" | "uniq" => args.iter().any(|arg| {
+            *arg == "-o"
+                || *arg == "--output"
+                || arg.starts_with("-o")
+                || arg.starts_with("--output=")
+        }),
+        "xxd" => args.iter().any(|arg| matches!(*arg, "-r" | "-revert")),
+        _ => false,
+    }
+}
+
+/// Read-only access to Claude Code settings is exempt from the tamper rule.
+/// Substitutions are rejected on top of the read-only check because they can
+/// smuggle a write through an otherwise read-only command line, e.g.
+/// `cat "$(cp evil.json ~/.claude/settings.json)"`.
+fn is_read_only_settings_access(cmd: &str) -> bool {
+    !cmd.contains("$(") && !cmd.contains('`') && !cmd.contains("<(") && is_read_only_command(cmd)
+}
+
+/// A non-force worktree removal is guarded by Git itself: Git refuses to
+/// remove a dirty worktree. Waive only the outside-project prompt for a single,
+/// unchained command; denied paths and hard policy blocks still run first.
+fn is_safe_worktree_removal(cmd: &str) -> bool {
+    if cmd.contains("$(")
+        || cmd
+            .chars()
+            .any(|character| matches!(character, ';' | '|' | '&' | '>' | '<' | '`' | '\n'))
+    {
+        return false;
+    }
+
+    let words: Vec<_> = cmd.split_whitespace().collect();
+    words.len() >= 4
+        && words[..3] == ["git", "worktree", "remove"]
+        && !words[3..].iter().any(|word| {
+            *word == "--force"
+                || (word.starts_with('-') && !word.starts_with("--") && word[1..].contains('f'))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn memory_snapshot_failure(
+    input: &HookInput,
+    policy: &Policy,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    state: &mut SessionState,
+    state_dir: &Path,
+    start: Instant,
+    error: &str,
+) -> PreToolResult {
+    let _ = state.save(state_dir);
+    log_decision(
+        input,
+        policy,
+        tool_name,
+        tool_input,
+        "block",
+        Some("memory-snapshot"),
+        start,
+    );
+    PreToolResult {
+        output: HookOutput::deny(&format!(
+            "⛔ Railguard: Memory Safety: deletion blocked because the pre-approval snapshot failed: {error}"
+        )),
+        terminate: None,
+    }
 }
 
 fn summarize_input(tool_name: &str, tool_input: &serde_json::Value) -> String {

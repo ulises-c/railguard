@@ -1,2 +1,0 @@
-{"timestamp":"2026-03-10T23:53:39.391113+00:00","session_id":"test-dashboard-001","event":"PreToolUse","tool":"Bash","input_summary":"echo hello","decision":"allow","duration_ms":10}
-{"timestamp":"2026-03-10T23:53:40.412335+00:00","session_id":"test-dashboard-001","event":"PreToolUse","tool":"Bash","input_summary":"rm -rf /","decision":"block","rule":"rm-rf-critical","duration_ms":4}
