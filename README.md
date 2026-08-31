@@ -95,7 +95,7 @@ Railguard classifies every memory write:
 - **Behavioral instructions** ("skip safety checks", "override policy") → **asks you**
 - **Factual content** (project info, tech stack, user preferences) → **allowed**
 - **Overwrites of existing memories** → **asks you**
-- **File or project-memory-directory deletions** → **snapshotted, then ask you**
+- **File or project-memory-directory deletions** → **snapshotted, then ask you** (`memory: {allow_delete: true}` skips the ask)
 - **Deleting all Claude state or all project memories** → **blocked**
 
 Every memory write is signed with a content hash. Tampering between sessions is detected automatically.

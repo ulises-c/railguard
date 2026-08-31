@@ -246,6 +246,11 @@ pub struct MemoryConfig {
     pub append_only: bool,
     #[serde(default = "default_true")]
     pub verify_on_read: bool,
+    /// Let agents delete or move individual memory files with Bash without
+    /// the approval prompt. Off by default. Container roots (all of ~/.claude
+    /// or ~/.claude/projects) stay blocked regardless.
+    #[serde(default)]
+    pub allow_delete: bool,
 }
 
 impl Default for MemoryConfig {
@@ -256,6 +261,7 @@ impl Default for MemoryConfig {
             block_secrets: true,
             append_only: true,
             verify_on_read: true,
+            allow_delete: false,
         }
     }
 }
