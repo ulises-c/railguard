@@ -506,6 +506,7 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
         .unwrap_or("");
     let is_vcs = matches!(eff, "git" | "gh");
     let is_interp = is_shell_or_interpreter(eff);
+    let program_idx = program_operand_index(&words, eff_idx, eff);
 
     let mut pending = NextWord::Operand;
     let mut word_no = 0usize;
@@ -521,6 +522,9 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
                     NextWord::Operand => {
                         if word_no <= eff_idx {
                             push_candidate(w, paths);
+                        } else if Some(word_no) == program_idx {
+                            // The tool's program/pattern: data it matches
+                            // against, never a file it opens.
                         } else if is_vcs && is_message_flag(w) {
                             // `-m msg` skips the following value; attached
                             // `--message=msg` skips only itself.
@@ -542,6 +546,85 @@ fn collect_paths_from_segment(tokens: &[&ShellToken], depth: usize, paths: &mut 
     }
 }
 
+/// Tools whose first non-option operand is a program or pattern rather than a
+/// path. `sed -n '/1000/p' f`, `awk '/total/{print}' f` and `grep -o '/1000' f`
+/// all name a regex there, and once the shell strips the quotes a
+/// slash-delimited regex is indistinguishable from a path (issue #32). Their
+/// *later* operands are real files and stay extracted.
+fn takes_program_operand(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "sed"
+            | "gsed"
+            | "awk"
+            | "gawk"
+            | "mawk"
+            | "nawk"
+            | "grep"
+            | "egrep"
+            | "fgrep"
+            | "rg"
+            | "ag"
+            | "ack"
+    )
+}
+
+/// A flag that supplies the program itself (`grep -f patterns.txt data.txt`,
+/// `sed -e 's/a/b/' f`), so no operand holds it and every operand is a path —
+/// including the flag's own value, which is a real file.
+fn supplies_program(word: &str) -> bool {
+    matches!(
+        word,
+        "-e" | "-f" | "--expression" | "--file" | "--regexp" | "--source"
+    ) || word.starts_with("--expression=")
+        || word.starts_with("--regexp=")
+        || word.starts_with("--file=")
+        || word.starts_with("--source=")
+        // attached short forms: -e's/a/b/', -fpatterns.txt
+        || (word.len() > 2
+            && !word.starts_with("--")
+            && (word.starts_with("-e") || word.starts_with("-f")))
+}
+
+/// Flags of these tools that consume the following word, so a flag value is
+/// never mistaken for the program operand. Deliberately short: an unlisted
+/// value-taking flag costs at most a surviving false positive, while wrongly
+/// listing one would skip a real path.
+fn consumes_next_value(tool: &str, word: &str) -> bool {
+    match tool {
+        "awk" | "gawk" | "mawk" | "nawk" => matches!(word, "-F" | "-v"),
+        _ => matches!(word, "-m" | "-A" | "-B" | "-C" | "-l"),
+    }
+}
+
+/// Index in `words` of the program/pattern operand, if this segment has one.
+fn program_operand_index(words: &[&str], eff_idx: usize, tool: &str) -> Option<usize> {
+    if !takes_program_operand(tool) {
+        return None;
+    }
+    let mut idx = eff_idx + 1;
+    while idx < words.len() {
+        let word = words[idx];
+        if word == "--" {
+            // Everything after `--` is an operand, so the program is next.
+            return (idx + 1 < words.len()).then_some(idx + 1);
+        }
+        if word.len() > 1 && word.starts_with('-') {
+            if supplies_program(word) {
+                return None;
+            }
+            idx += if consumes_next_value(tool, word) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        return Some(idx);
+    }
+    None
+}
+
 /// Index of the real command in a segment, skipping a leading run of env
 /// assignments (`FOO=bar`), wrapper commands (`env`, `timeout`, `xargs`, ...),
 /// and — once a wrapper has been seen — that wrapper's flag/numeric arguments.
@@ -550,7 +633,15 @@ fn effective_command_index(words: &[&str]) -> usize {
     let mut saw_prefix = false;
     while idx < words.len() {
         let w = words[idx];
-        if is_env_assignment(w) || is_wrapper(command_basename(w)) {
+        if command_basename(w) == "rtk" {
+            // RTK dispatches the remaining words as the real command. Its
+            // explicit `proxy` subcommand is routing syntax, not the command.
+            saw_prefix = true;
+            idx += 1;
+            if words.get(idx).is_some_and(|word| *word == "proxy") {
+                idx += 1;
+            }
+        } else if is_env_assignment(w) || is_wrapper(command_basename(w)) {
             saw_prefix = true;
             idx += 1;
         } else if saw_prefix
@@ -1374,6 +1465,56 @@ mod tests {
             .contains(&"/etc/cron.d/x".to_string()));
         assert!(extract_paths_from_command("gcc -I/usr/include/x main.c")
             .contains(&"/usr/include/x".to_string()));
+    }
+
+    #[test]
+    fn test_regex_operand_is_not_a_path() {
+        // Issue #32: a slash-delimited regex is the tool's program, not a file.
+        for cmd in [
+            r#"cargo test 2>&1 | awk '/test result/ {print $4}'"#,
+            r#"cargo test | sed -n '/1000/p'"#,
+            r#"cargo test | sed -n '/1000/,$p'"#,
+            r#"cargo test | grep -o '/1000'"#,
+            r#"cargo build | rg '/etc/passwd'"#,
+            r#"cargo test | grep -- '/1000/'"#,
+            r#"rtk sed -n '/Operating/,/Wholesale/p' local.txt"#,
+            r#"rtk proxy sed -n '/Flagged/,/^$/p' local.txt"#,
+        ] {
+            assert!(
+                extract_paths_from_command(cmd).is_empty(),
+                "{cmd} -> {:?}",
+                extract_paths_from_command(cmd)
+            );
+        }
+    }
+
+    #[test]
+    fn test_path_operands_of_regex_tools_still_extracted() {
+        // The skip covers only the program slot; real files must stay fenced.
+        for (cmd, expected) in [
+            (r#"awk '{print}' /etc/passwd"#, "/etc/passwd"),
+            (r#"sed -n '/x/p' /etc/shadow"#, "/etc/shadow"),
+            (r#"sed -i 's/a/b/' /etc/hosts"#, "/etc/hosts"),
+            (r#"grep -A 3 pattern /etc/shadow"#, "/etc/shadow"),
+            (r#"awk -F, '{print $1}' /etc/passwd"#, "/etc/passwd"),
+            // -f supplies the program, so its value is a real file and the
+            // operand after it is a data file — neither may be skipped.
+            (r#"grep -f /etc/patterns /var/log/syslog"#, "/etc/patterns"),
+            (
+                r#"grep -f /etc/patterns /var/log/syslog"#,
+                "/var/log/syslog",
+            ),
+            (r#"grep -- pattern /etc/shadow"#, "/etc/shadow"),
+            (r#"cat /etc/shadow | grep '/1000/'"#, "/etc/shadow"),
+            (r#"rtk sed -n '/x/p' /etc/shadow"#, "/etc/shadow"),
+            (r#"rtk proxy grep pattern /etc/shadow"#, "/etc/shadow"),
+        ] {
+            let paths = extract_paths_from_command(cmd);
+            assert!(
+                paths.contains(&expected.to_string()),
+                "{cmd} -> {paths:?} (missing {expected})"
+            );
+        }
     }
 
     #[test]

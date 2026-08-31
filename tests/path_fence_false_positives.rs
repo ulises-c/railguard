@@ -195,6 +195,97 @@ fn benign_commands_are_not_path_fenced() {
     );
 }
 
+/// Issue #32, unmasked. The BENIGN corpus above already carries sed/awk regex
+/// addresses, but every one of those pipelines is read-only end to end, so
+/// `is_read_only_command` waives the prompt and the extraction bug stays
+/// hidden. Pairing the same regexes with a non-read-only stage (`cargo test`)
+/// removes the waiver, so these fail on the extraction itself.
+const REGEX_OPERAND_BESIDE_WRITE_CAPABLE: &[(&str, &str)] = &[
+    (
+        "awk regex",
+        r#"cargo test 2>&1 | awk '/test result/ {print $4}'"#,
+    ),
+    ("sed address", r#"cargo test | sed -n '/1000/p'"#),
+    ("sed range", r#"cargo test | sed -n '/1000/,$p'"#),
+    ("grep literal", r#"cargo test | grep -o '/1000'"#),
+    ("rg pattern", r#"cargo build | rg '/etc/passwd'"#),
+    (
+        "rtk sed address",
+        r#"rtk sed -n '/Operating/,/Wholesale/p' local.txt"#,
+    ),
+    (
+        "rtk proxy sed address",
+        r#"rtk proxy sed -n '/Flagged/,/^$/p' local.txt"#,
+    ),
+];
+
+#[test]
+fn regex_operands_beside_a_write_capable_stage_are_not_fenced() {
+    let dir = create_policy_dir("version: 1\nblocklist: []\n");
+    let cwd = dir.path().to_str().unwrap();
+    let mut failures = Vec::new();
+
+    for (label, cmd) in REGEX_OPERAND_BESIDE_WRITE_CAPABLE {
+        let stdout = simulate_hook(&railguard_binary(), &bash_input(cwd, cmd));
+        if path_fenced(&stdout) {
+            failures.push(format!("  [{label}] `{cmd}`"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} regex operand(s) were fenced as paths:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The flip side: the same tools naming a real file outside the project must
+/// still be fenced. Only the program slot is exempt, never a path operand.
+const REGEX_TOOL_REAL_PATH_OUTSIDE: &[(&str, &str)] = &[
+    (
+        "sed file operand outside",
+        r#"cargo run | sed -n '/x/p' ~/outside/f.txt"#,
+    ),
+    (
+        "awk file operand outside",
+        r#"cargo run | awk '/x/{print}' ~/outside/f.txt"#,
+    ),
+    (
+        "grep -f outside",
+        r#"cargo run | grep -f ~/outside/patterns.txt data.txt"#,
+    ),
+    (
+        "rtk sed file operand outside",
+        r#"rtk sed -n '/x/p' ~/outside/f.txt"#,
+    ),
+    (
+        "rtk proxy grep file operand outside",
+        r#"rtk proxy grep pattern ~/outside/f.txt"#,
+    ),
+];
+
+#[test]
+fn regex_tools_naming_real_outside_paths_are_still_fenced() {
+    let dir = create_policy_dir("version: 1\nblocklist: []\n");
+    let cwd = dir.path().to_str().unwrap();
+    let mut leaks = Vec::new();
+
+    for (label, cmd) in REGEX_TOOL_REAL_PATH_OUTSIDE {
+        let stdout = simulate_hook(&railguard_binary(), &bash_input(cwd, cmd));
+        if !path_fenced(&stdout) {
+            leaks.push(format!("  [{label}] `{cmd}`"));
+        }
+    }
+
+    assert!(
+        leaks.is_empty(),
+        "{} outside path(s) slipped past the fence:\n{}",
+        leaks.len(),
+        leaks.join("\n")
+    );
+}
+
 /// The flip side of prompt fatigue: write-capable tools that name a path OUTSIDE
 /// the project must still be fenced. `is_read_only_command` waives the prompt
 /// only for tools that purely read; interpreters, compilers, VCS, package
@@ -221,6 +312,34 @@ const WRITE_CAPABLE_OUTSIDE: &[(&str, &str)] = &[
     ("bash -c naming outside", r#"bash -c "touch ~/outside/x""#),
     ("cp to outside", r#"cp notes.txt ~/outside/x"#),
     ("redirect to outside", r#"echo x > ~/outside/x"#),
+    ("find delete", r#"find ~/outside -depth -delete"#),
+    ("find exec", r#"find ~/outside -exec rm {} +"#),
+    ("find execdir", r#"find ~/outside -execdir rm {} +"#),
+    ("find ok", r#"find ~/outside -ok rm {} +"#),
+    ("sed in place", r#"sed -i 's/a/b/' ~/outside/file"#),
+    (
+        "sed backup in place",
+        r#"sed -ibak 's/a/b/' ~/outside/file"#,
+    ),
+    (
+        "sed long in place",
+        r#"sed --in-place 's/a/b/' ~/outside/file"#,
+    ),
+    ("yq in place", r#"yq -i '.x = 1' ~/outside/file.yaml"#),
+    (
+        "yq long in place",
+        r#"yq --inplace '.x = 1' ~/outside/file.yaml"#,
+    ),
+    ("sort output", r#"sort -o ~/outside/sorted.txt input.txt"#),
+    (
+        "sort long output",
+        r#"sort --output ~/outside/sorted.txt input.txt"#,
+    ),
+    (
+        "uniq output",
+        r#"uniq --output=~/outside/uniq.txt input.txt"#,
+    ),
+    ("xxd revert", r#"xxd -r dump.hex ~/outside/output.bin"#),
 ];
 
 #[test]
@@ -243,4 +362,115 @@ fn write_capable_commands_outside_project_are_fenced() {
         leaks.len(),
         leaks.join("\n")
     );
+}
+
+#[test]
+fn non_force_worktree_removal_outside_project_is_allowed() {
+    let dir = create_policy_dir("version: 1\nblocklist: []\n");
+    let cwd = dir.path().to_str().unwrap();
+    let stdout = simulate_hook(
+        &railguard_binary(),
+        &bash_input(cwd, "git worktree remove ~/old-worktree"),
+    );
+
+    assert!(
+        stdout.contains("\"permissionDecision\":\"allow\""),
+        "non-force worktree removal should rely on Git's dirty-worktree check: {stdout}"
+    );
+}
+
+#[test]
+fn hard_policy_block_wins_over_outside_project_prompt() {
+    let dir = create_policy_dir(
+        r#"version: 1
+blocklist:
+  - name: never-delete-marker
+    tool: Bash
+    pattern: "rm\\s+.*outside-policy-block"
+    action: block
+    message: "test hard block"
+"#,
+    );
+    let cwd = dir.path().to_str().unwrap();
+    let stdout = simulate_hook(
+        &railguard_binary(),
+        &bash_input(cwd, "rm -rf ~/outside-policy-block"),
+    );
+
+    assert!(stdout.contains("Railguard BLOCKED"), "stdout: {stdout}");
+    assert!(!path_fenced(&stdout), "hard block was downgraded: {stdout}");
+}
+
+#[test]
+fn memory_delete_is_snapshotted_before_approval() {
+    let dir = tempfile::Builder::new()
+        .prefix(".railguard-memory-test-")
+        .tempdir_in(std::env::current_dir().unwrap())
+        .unwrap();
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join("railguard.yaml"),
+        "version: 1\nblocklist: []\n",
+    )
+    .unwrap();
+    let memory_dir = dir.path().join(".claude/projects/test-project/memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let memory_file = memory_dir.join("stale.md");
+    std::fs::write(&memory_file, "stale memory").unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let session_id = unique_session_id();
+    let command = format!("rm -rf {}", memory_dir.display());
+    let paths = railguard::block::evasion::extract_paths_from_command(&command);
+    assert!(
+        paths
+            .iter()
+            .any(|path| railguard::memory::guard::is_memory_path(path)),
+        "memory path was not extracted from `{command}`: {paths:?}"
+    );
+    let loaded =
+        railguard::policy::loader::load_policy(&dir.path().join("railguard.yaml")).unwrap();
+    assert!(loaded.memory.enabled);
+    let input = serde_json::json!({
+        "session_id": session_id,
+        "cwd": cwd,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+        "tool_use_id": "memory-delete"
+    })
+    .to_string();
+
+    let stdout = simulate_hook(&railguard_binary(), &input);
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "stdout: {stdout}"
+    );
+
+    let manifest = dir
+        .path()
+        .join(".railguard/snapshots")
+        .join(&session_id)
+        .join("manifest.jsonl");
+    let entries = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|error| panic!("missing pre-approval snapshot: {error}"));
+    assert!(entries.contains(memory_file.to_str().unwrap()), "{entries}");
+}
+
+#[test]
+fn claude_memory_container_roots_remain_blocked() {
+    let dir = create_policy_dir(
+        "version: 1\nblocklist: []\nmemory:\n  enabled: false\nfence:\n  enabled: false\n",
+    );
+    let cwd = dir.path().to_str().unwrap();
+
+    for target in ["~/.claude", "~/.claude/projects"] {
+        let stdout = simulate_hook(
+            &railguard_binary(),
+            &bash_input(cwd, &format!("find {target} -depth -delete")),
+        );
+        assert!(
+            stdout.contains("\"permissionDecision\":\"deny\""),
+            "`{target}` should remain blocked: {stdout}"
+        );
+    }
 }

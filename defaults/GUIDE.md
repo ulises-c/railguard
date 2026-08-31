@@ -20,6 +20,10 @@ carries only the core rules; this guide is printed on demand by
   Codex, which cannot answer the resume prompt. You cannot run it yourself.
 - **File writes are snapshotted.** Every Write/Edit/apply_patch is backed up before
   execution. The human can rollback any change.
+- **Memory is guarded, not frozen.** Changing or deleting an existing memory
+  file (or a project memory directory) asks the human, and deletions are
+  snapshotted first so they can be rolled back. Deleting `~/.claude` or
+  `~/.claude/projects` wholesale is always blocked.
 - **Everything is logged.** All tool calls and decisions are recorded in
   `.railguard/traces/`.
 
@@ -103,6 +107,8 @@ Changes take effect on the next tool call. Details:
   blocked. Codex keeps hook trust state and the `hooks` feature flag in
   `~/.codex/config.toml`, so the whole directory is fenced, not just
   `hooks.json`. Launching a nested agent with hooks disabled is blocked too.
+  Plain read-only inspection of hook settings is allowed only when a
+  machine-owned fence policy already permits access to that path.
 - Remove the railguard binary - it will be blocked.
 - Access `~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc`, or other fenced paths (if
   path fencing is enabled).

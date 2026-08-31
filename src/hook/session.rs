@@ -7,6 +7,31 @@ use crate::trace::logger::log_trace;
 use crate::types::{HookInput, HookOutput, Policy, TraceEntry};
 use crate::update;
 
+/// How many flagged files the SessionStart warning names inline.
+const MEMORY_WARNING_SAMPLE: usize = 3;
+
+/// Format the memory-integrity warning injected at SessionStart.
+///
+/// Only a sample of the flagged files is named. This fires on every session
+/// start and the list grows with the number of flagged files, so a full
+/// enumeration turns into a large block of agent context that gates nothing —
+/// the summary line already points at `railguard memory verify`, which prints
+/// the complete list on demand.
+fn format_memory_warning(warnings: &[String]) -> String {
+    let mut msg = format!(
+        "⚠️ Railguard Memory: {} memory file(s) have integrity issues. Run `railguard memory verify` for details.",
+        warnings.len()
+    );
+    for w in warnings.iter().take(MEMORY_WARNING_SAMPLE) {
+        msg.push_str(&format!("\n  • {}", w));
+    }
+    let remaining = warnings.len().saturating_sub(MEMORY_WARNING_SAMPLE);
+    if remaining > 0 {
+        msg.push_str(&format!("\n  • …and {} more", remaining));
+    }
+    msg
+}
+
 /// Handle a SessionStart event.
 /// Logs the session initialization and warns about previous terminations.
 /// Returns a HookOutput with optional update notification.
@@ -76,11 +101,7 @@ pub fn handle(input: &HookInput, policy: &Policy) -> HookOutput {
         if warnings.is_empty() {
             None
         } else {
-            Some(format!(
-                "⚠️ Railguard Memory: {} memory file(s) have integrity issues. Run `railguard memory verify` for details.\n{}",
-                warnings.len(),
-                warnings.iter().map(|w| format!("  • {}", w)).collect::<Vec<_>>().join("\n")
-            ))
+            Some(format_memory_warning(&warnings))
         }
     } else {
         None
@@ -106,5 +127,59 @@ pub fn handle(input: &HookInput, policy: &Policy) -> HookOutput {
     match combined {
         Some(msg) => HookOutput::session_message(&msg),
         None => HookOutput::noop(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn warnings(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "~/.claude/projects/p{}/memory/file_{}.md: no provenance record",
+                    i, i
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn names_every_file_when_under_the_sample_size() {
+        let msg = format_memory_warning(&warnings(2));
+        assert!(msg.contains("2 memory file(s)"));
+        assert!(msg.contains("file_0.md"));
+        assert!(msg.contains("file_1.md"));
+        assert!(!msg.contains("and 0 more"));
+    }
+
+    #[test]
+    fn caps_the_list_and_counts_the_remainder() {
+        let msg = format_memory_warning(&warnings(24));
+        // The true count still leads the message; only the listing is capped.
+        assert!(msg.contains("24 memory file(s)"));
+        assert_eq!(msg.matches("  • ").count(), MEMORY_WARNING_SAMPLE + 1);
+        assert!(msg.contains("…and 21 more"));
+        assert!(!msg.contains("file_23.md"));
+    }
+
+    #[test]
+    fn stays_bounded_as_the_flagged_count_grows() {
+        // The point of the cap: message size must not track the file count.
+        let small = format_memory_warning(&warnings(5)).len();
+        let huge = format_memory_warning(&warnings(500)).len();
+        assert!(
+            huge - small < 40,
+            "message grew {} bytes between 5 and 500 flagged files",
+            huge - small
+        );
+    }
+
+    #[test]
+    fn always_points_at_the_command_that_prints_the_full_list() {
+        for n in [1, 3, 4, 100] {
+            assert!(format_memory_warning(&warnings(n)).contains("railguard memory verify"));
+        }
     }
 }

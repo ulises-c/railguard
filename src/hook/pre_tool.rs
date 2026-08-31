@@ -267,37 +267,70 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
     // denied path was never examined. Its `Allow` still has to suppress the fence
     // — memory lives under `~/.claude`, which is denied — but only for the memory
     // paths themselves, never for the rest of the call.
-    let mut memory_decision = Decision::Allow;
+    let command_paths = if runs_shell_command {
+        evasion::extract_paths_from_command(&command)
+    } else {
+        Vec::new()
+    };
+    let memory_paths: Vec<String> = if runs_shell_command {
+        command_paths
+            .iter()
+            .filter(|path| memory_guard::is_memory_path(path))
+            .cloned()
+            .collect()
+    } else {
+        file_paths
+            .iter()
+            .filter(|path| memory_guard::is_memory_path(path))
+            .cloned()
+            .collect()
+    };
+    let memory_delete = runs_shell_command && memory_guard::is_memory_delete_command(&command);
+    let mut memory_decision = if memory_delete
+        && command_paths
+            .iter()
+            .any(|path| memory_guard::is_memory_container_root(path))
+    {
+        Decision::Block {
+            rule: "memory-container-root".to_string(),
+            message: "Memory Safety: deleting ~/.claude or ~/.claude/projects is blocked."
+                .to_string(),
+        }
+    } else {
+        Decision::Allow
+    };
     let mut fence_exempt: Vec<String> = Vec::new();
 
     if policy.memory.enabled {
-        let memory_paths: Vec<String> = if runs_shell_command {
-            evasion::extract_paths_from_command(&command)
-                .into_iter()
-                .filter(|p| memory_guard::is_memory_path(p))
-                .collect()
+        // Shell-capable MCP tools must get Bash memory semantics too; otherwise
+        // a delete carried by an unfamiliar tool is treated as a content-less
+        // write instead of the snapshot-before-approval operation it really is.
+        let memory_tool_name = if runs_shell_command {
+            "Bash"
         } else {
-            file_paths
-                .iter()
-                .filter(|path| memory_guard::is_memory_path(path))
-                .cloned()
-                .collect()
+            tool_name
         };
-
+        let memory_tool_input = if runs_shell_command {
+            serde_json::json!({ "command": command.clone() })
+        } else {
+            tool_input.clone()
+        };
         for mem_path in &memory_paths {
             let result = memory_guard::check_memory_write(
                 &policy.memory,
-                tool_name,
+                memory_tool_name,
                 mem_path,
-                &tool_input,
+                &memory_tool_input,
                 &input.session_id,
                 cwd,
             );
+            // The memory guard is authoritative for this path at every
+            // restrictiveness level. Letting the generic ~/.claude fence run
+            // afterwards would turn its snapshot-backed approval into a hard
+            // denial before the decision lattice is reached.
+            fence_exempt.push(mem_path.clone());
             let as_decision = match result {
-                MemoryDecision::Allow => {
-                    fence_exempt.push(mem_path.clone());
-                    Decision::Allow
-                }
+                MemoryDecision::Allow => Decision::Allow,
                 MemoryDecision::Block(reason) => Decision::Block {
                     rule: "memory-guard".to_string(),
                     message: reason,
@@ -309,6 +342,30 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
             };
             if restrictiveness(&as_decision) > restrictiveness(&memory_decision) {
                 memory_decision = as_decision;
+            }
+        }
+
+        // An approved memory deletion must be recoverable before its prompt is
+        // emitted. Snapshot every affected memory path; a partial or failed
+        // snapshot converts the call to a hard block.
+        if memory_delete && matches!(memory_decision, Decision::Approve { .. }) {
+            let snap_dir = Path::new(&fence_root).join(&policy.snapshot.directory);
+            let tool_use_id = input.tool_use_id.as_deref().unwrap_or("unknown");
+            let snapshot_result = memory_paths.iter().try_for_each(|path| {
+                memory_guard::files_to_snapshot(path)?
+                    .into_iter()
+                    .try_for_each(|file| {
+                        capture_snapshot(&snap_dir, &input.session_id, tool_use_id, &file)
+                            .map(|_| ())
+                    })
+            });
+            if let Err(error) = snapshot_result {
+                memory_decision = Decision::Block {
+                    rule: "memory-snapshot".to_string(),
+                    message: format!(
+                        "Memory Safety: deletion blocked because the pre-approval snapshot failed: {error}"
+                    ),
+                };
             }
         }
     }
@@ -352,8 +409,13 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
                         };
                     }
                     PathCheck::OutsideProject(reason) => {
-                        // Read-only commands outside the project are fine.
-                        if !is_read_only_command(cmd) && deferred_ask.is_none() {
+                        // Read-only commands and a single non-force worktree
+                        // removal are safe outside the project. Git itself
+                        // refuses to remove a dirty worktree unless forced.
+                        if !is_read_only_command(cmd)
+                            && !is_safe_worktree_removal(cmd)
+                            && deferred_ask.is_none()
+                        {
                             deferred_ask = Some(format!(
                                 "🛡️ RAILGUARD is asking (not Claude Code's permission system).\n\
                                  \n\
@@ -438,6 +500,10 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
     } else {
         cannot_write_any_file(&command)
     };
+    // Upstream allows an explicitly fence-permitted read of hook settings. The
+    // branch's built-in fence still denies ~/.claude and ~/.codex by default;
+    // this only matters after the machine owner has deliberately relaxed it.
+    let settings_read_only = runs_shell_command && is_read_only_command(&command);
 
     // Resources are matched by resolved identity, so a symlink or a `..` detour
     // lands on the same canonical path and a filename inside a comment resolves to
@@ -453,6 +519,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
         protected_decision = by_command;
     }
     let protected_decision = soften_if_read_only(protected_decision, read_only_caller);
+    let protected_decision = allow_read_only_hook_settings(protected_decision, settings_read_only);
 
     // === POLICY EVALUATION (allowlist → blocklist → approve) ===
 
@@ -475,6 +542,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
     } else {
         evaluate(policy, tool_name, &tool_input)
     };
+    let policy_decision = allow_read_only_hook_settings(policy_decision, settings_read_only);
     let mut decision = if restrictiveness(&protected_decision) >= restrictiveness(&policy_decision)
     {
         protected_decision
@@ -504,6 +572,7 @@ pub fn handle(input: &HookInput, policy: &Policy, client: HookClient) -> PreTool
             "Bash",
             &serde_json::json!({ "command": command.clone() }),
         );
+        let as_bash = allow_read_only_hook_settings(as_bash, settings_read_only);
         if restrictiveness(&as_bash) > restrictiveness(&decision) {
             decision = as_bash;
         }
@@ -825,6 +894,26 @@ fn contains_command_substitution(cmd: &str) -> bool {
     let bytes = cmd.as_bytes();
     cmd.match_indices("$(")
         .any(|(i, _)| bytes.get(i + 2) != Some(&b'('))
+}
+
+/// A single non-force worktree removal is guarded by Git itself: Git refuses to
+/// remove a dirty worktree. Denied paths and policy rules still run separately.
+fn is_safe_worktree_removal(cmd: &str) -> bool {
+    if cmd.contains("$(")
+        || cmd
+            .chars()
+            .any(|character| matches!(character, ';' | '|' | '&' | '>' | '<' | '`' | '\n'))
+    {
+        return false;
+    }
+
+    let words: Vec<_> = cmd.split_whitespace().collect();
+    words.len() >= 4
+        && words[..3] == ["git", "worktree", "remove"]
+        && !words[3..].iter().any(|word| {
+            *word == "--force"
+                || (word.starts_with('-') && !word.starts_with("--") && word[1..].contains('f'))
+        })
 }
 
 fn segments(cmd: &str) -> impl Iterator<Item = &str> {
@@ -1402,6 +1491,27 @@ fn soften_if_read_only(decision: Decision, read_only: bool) -> Decision {
     match decision {
         Decision::Block { rule, message } => Decision::Approve { rule, message },
         Decision::Approve { .. } | Decision::Allow => Decision::Allow,
+    }
+}
+
+/// Hook settings may be inspected only when the path fence already permits the
+/// access and the complete shell command is proven read-only. The default fence
+/// still denies ~/.claude and ~/.codex, so only a machine-owned policy can make
+/// this exemption reachable.
+fn allow_read_only_hook_settings(decision: Decision, read_only: bool) -> Decision {
+    if !read_only {
+        return decision;
+    }
+    match &decision {
+        Decision::Block { rule, .. } | Decision::Approve { rule, .. }
+            if matches!(
+                rule.as_str(),
+                "railguard-protect-hooks" | "railguard-tamper-settings"
+            ) =>
+        {
+            Decision::Allow
+        }
+        _ => decision,
     }
 }
 
