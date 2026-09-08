@@ -697,6 +697,34 @@ fn self_protect_allows_readonly_settings_access() {
     }
 }
 
+// Observed 2026-09-08: the rule is a regex over the whole command text, so it
+// fired on commands that only *named* the path and could not write it. A
+// mention is inert when every segment it appears in is read-only, or when it
+// sits in a heredoc body that only a data sink consumes.
+#[test]
+fn self_protect_ignores_settings_mentions_in_data_positions() {
+    let dir = create_policy_dir(SETTINGS_READ_POLICY);
+    for command in [
+        // A note about the file, written through a data sink.
+        "cat > ~/.claude/notes.md <<'MD'\nEdit ~/.claude/settings.json to add the hook.\nMD",
+        // The path only inside a grep pattern, in a chain that is not
+        // read-only end to end.
+        "cd ~/.claude && grep -rn 'Modify `~/.claude/settings.json`' docs 2>/dev/null | head -5; echo done; ls docs",
+        // stderr and /dev/null redirects are not writes.
+        "grep -n hooks ~/.claude/settings.json 2>/dev/null",
+        "cat ~/.claude/settings.json 2>&1 | head -3",
+        // A transparent wrapper in front of a read.
+        "rtk grep -n hooks ~/.claude/settings.json",
+    ] {
+        let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
+        let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);
+        assert!(
+            !output_contains_deny(&stdout),
+            "`{command}` only mentions settings.json and should not be denied: {stdout}"
+        );
+    }
+}
+
 #[test]
 fn self_protect_still_blocks_settings_writes() {
     let dir = create_policy_dir(SETTINGS_READ_POLICY);
@@ -708,6 +736,14 @@ fn self_protect_still_blocks_settings_writes() {
         "cat /tmp/evil.json > ~/.claude/settings.json",
         "cat \"$(cp /tmp/evil.json ~/.claude/settings.json)\"",
         "grep hooks ~/.claude/settings.json && rm -f ~/.claude/settings.json",
+        // The path inside a heredoc body that an interpreter or shell runs.
+        "python3 - <<'PY'\nopen('/home/u/.claude/settings.json', 'w').write('{}')\nPY",
+        "cat <<'EOF' | bash\ncp /tmp/evil.json ~/.claude/settings.json\nEOF",
+        // The path as the redirect or sink of a heredoc pipeline.
+        "cat <<'EOF' > ~/.claude/settings.json\n{}\nEOF",
+        "echo '{}' | tee ~/.claude/settings.json",
+        // A read-only segment does not launder a writing one.
+        "grep hooks ~/.claude/settings.json; sed -i 's/a/b/' ~/.claude/settings.json",
     ] {
         let input = make_bash_input(&unique_session_id(), dir.path().to_str().unwrap(), command);
         let (_, stdout) = simulate_hook(&railguard_binary(), "PreToolUse", &input);

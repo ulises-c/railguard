@@ -150,7 +150,7 @@ Threat detection runs **before** policy evaluation in the PreToolUse handler for
   - `eval` with variable expansion (`eval $SOMETHING`)
   - Multiple short variable assignments with concatenation (`a="x"; b="y"; "$a$b"`)
 
-- **Tier 3 -- Behavioral Retry.** `check_behavioral_evasion(state, cmd)` detects when the agent retries a blocked command using different syntax. After any block, the session enters a "heightened state" for 3 tool calls. During this window, if a new command shares 2+ keywords with the blocked command, it is classified as Tier 3 and the session is terminated.
+- **Tier 3 -- Behavioral Retry.** `check_behavioral_evasion(state, cmd)` detects when the agent retries a blocked command using different syntax. After any block, the session enters a "heightened state" for 3 tool calls. During this window, a new command that shares 2+ keywords with the blocked command is classified as Tier 3 and the user is asked to approve it. When the block recorded anchors (the words its rule matched, or the fenced path), the command must also contain one of them, so unrelated commands that share only boilerplate are not retries.
 
 Keywords are extracted by `extract_keywords()`, which filters out common shell noise tokens (`|`, `&&`, `sh`, `echo`, `if`, etc.) and short words.
 
@@ -161,9 +161,10 @@ Keywords are extracted by `extract_keywords()`, which filters out common shell n
 - `tool_call_count` -- Monotonically incrementing counter.
 - `suspicion_level` -- 0 (normal), 1 (warned), 2 (heightened).
 - `warning_count` -- Number of Tier 2 warnings issued.
-- `block_history` -- Vec of `BlockEvent` (timestamp, command, rule, keywords, tier).
+- `block_history` -- Vec of `BlockEvent` (timestamp, command, rule, keywords, anchors, tier).
 - `heightened_until_call` -- Tool call count at which heightened mode expires (current + 3).
 - `heightened_keywords` -- Keywords to watch for during heightened state.
+- `heightened_anchors` -- Anchors of the block that armed the heightened state; a retry must contain one. Empty keeps the keyword-only check.
 - `terminated` -- Boolean flag. Once set, all subsequent tool calls in this session are denied.
 - `termination_reason`, `termination_timestamp` -- Forensic metadata.
 

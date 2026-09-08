@@ -171,6 +171,17 @@ const BENIGN: &[(&str, &str)] = &[
         "heredoc doc text",
         "cat <<EOF\nSee /verify and ~/.claude/docs for details\nEOF",
     ),
+    // ── read-only outside the project: the waiver survives an `rtk` wrapper
+    //    and stderr / `/dev/null` redirects, which write no file ──
+    ("rtk read outside", r#"rtk grep -n x ~/outside/f.txt"#),
+    (
+        "rtk proxy read outside",
+        r#"rtk proxy sed -n '/x/p' ~/outside/f.txt"#,
+    ),
+    (
+        "read outside with stderr redirect",
+        r#"grep -n x ~/outside/f.txt 2>/dev/null | head"#,
+    ),
 ];
 
 #[test]
@@ -255,13 +266,15 @@ const REGEX_TOOL_REAL_PATH_OUTSIDE: &[(&str, &str)] = &[
         "grep -f outside",
         r#"cargo run | grep -f ~/outside/patterns.txt data.txt"#,
     ),
+    // `rtk` is a transparent wrapper, so a wrapped read is waived like a bare
+    // one; the write-capable stage removes the waiver here as well.
     (
         "rtk sed file operand outside",
-        r#"rtk sed -n '/x/p' ~/outside/f.txt"#,
+        r#"cargo run | rtk sed -n '/x/p' ~/outside/f.txt"#,
     ),
     (
         "rtk proxy grep file operand outside",
-        r#"rtk proxy grep pattern ~/outside/f.txt"#,
+        r#"cargo run | rtk proxy grep pattern ~/outside/f.txt"#,
     ),
 ];
 

@@ -292,6 +292,65 @@ fn tier3_retry_after_block_asks_user() {
     );
 }
 
+// Observed 2026-09-08: a block arms a 3-call window in which any command
+// sharing two keywords with the blocked one was flagged as a retry. Unrelated
+// commands issued in the same batch shared only boilerplate. A block is now
+// anchored on the words its rule matched, and a retry must reuse one of them.
+#[test]
+fn tier3_ignores_unrelated_commands_after_an_anchored_block() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+
+    // Policy block on `terraform destroy` inside a longer chain: the chain's
+    // other words (`infra`, `cat`, `notes.md`) are keywords but not anchors.
+    let sid = unique_session_id();
+    let blocked = make_bash_input(&sid, cwd, "cd infra && terraform destroy && cat notes.md");
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &blocked);
+    assert!(
+        output_contains_deny(&stdout),
+        "chain should be blocked: {stdout}"
+    );
+
+    let unrelated = make_bash_input(&sid, cwd, "cd infra && cat notes.md");
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &unrelated);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "shared keywords without the rule's target are not a retry: {stdout}"
+    );
+
+    let retry = make_bash_input(&sid, cwd, "cd infra && terraform apply -destroy");
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &retry);
+    assert!(
+        output_is_not_allowed(&stdout),
+        "naming the target again is a retry: {stdout}"
+    );
+
+    // The incident shape: an interpreter heredoc writing the settings file is
+    // blocked, and the next heredoc only shares Python boilerplate with it.
+    let sid = unique_session_id();
+    let blocked = make_bash_input(
+        &sid,
+        cwd,
+        "python3 - <<'PY'\nimport pathlib\npathlib.Path('/home/u/.claude/settings.json').write_text('{}')\nPY",
+    );
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &blocked);
+    assert!(
+        output_contains_deny(&stdout),
+        "settings write should be blocked: {stdout}"
+    );
+
+    let unrelated = make_bash_input(
+        &sid,
+        cwd,
+        "python3 - <<'PY'\nimport pathlib\nprint(pathlib.Path('README.md').read_text())\nPY",
+    );
+    let (_, stdout, _) = simulate_hook(&railguard_binary(), "PreToolUse", &unrelated);
+    assert!(
+        !output_is_not_allowed(&stdout),
+        "unrelated Python heredoc is not a retry: {stdout}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // SESSION STATE PERSISTENCE
 // ═══════════════════════════════════════════════════════════════════

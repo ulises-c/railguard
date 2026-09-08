@@ -45,7 +45,7 @@ Railguard blocks catastrophic, remote, and data-destructive operations. Local pr
 | Rule | What it catches |
 |------|----------------|
 | `railguard-uninstall` | `railguard uninstall` |
-| `railguard-tamper-settings` | Edits to `.claude/settings.json` (provably read-only commands, e.g. a plain `grep`/`cat`, are exempt) |
+| `railguard-tamper-settings` | Bash writes to `.claude/settings.json`. Read-only commands (`grep`, `cat`, `jq`, ...) and mentions in data positions (a heredoc body headed for `cat`/`tee`, a grep pattern) are exempt, even inside a longer chain |
 | `railguard-remove-binary` | `rm` targeting railguard binary |
 | `railguard-config-edit` | Edits to `railguard.yaml` (approve) |
 

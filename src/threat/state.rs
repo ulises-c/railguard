@@ -16,6 +16,10 @@ pub struct SessionState {
     pub heightened_until_call: Option<u64>,
     /// Keywords to watch for during heightened state
     pub heightened_keywords: Vec<String>,
+    /// Anchors of the block that armed the heightened state (see
+    /// `BlockEvent::anchors`).
+    #[serde(default)]
+    pub heightened_anchors: Vec<String>,
     /// Threat patterns the user has approved for this session.
     /// Once approved, the same pattern won't prompt again.
     #[serde(default)]
@@ -61,6 +65,10 @@ pub struct BlockEvent {
     pub command: String,
     pub rule: String,
     pub keywords: Vec<String>,
+    /// Words of the text the rule matched (or of the fenced path). A retry
+    /// must reuse one of them; empty means the keyword-only check applies.
+    #[serde(default)]
+    pub anchors: Vec<String>,
     pub tier: u8,
 }
 
@@ -74,6 +82,7 @@ impl SessionState {
             block_history: Vec::new(),
             heightened_until_call: None,
             heightened_keywords: Vec::new(),
+            heightened_anchors: Vec::new(),
             session_approvals: Vec::new(),
             pending_approval: None,
             project_root: None,
@@ -250,18 +259,35 @@ impl SessionState {
     }
 
     pub fn record_block(&mut self, command: &str, rule: &str, keywords: Vec<String>, tier: u8) {
+        self.record_block_anchored(command, rule, keywords, Vec::new(), tier);
+    }
+
+    /// Record a block and arm the heightened window. While `anchors` are
+    /// present, a Tier 3 retry must reuse one of them on top of the keyword
+    /// threshold, so unrelated commands that share boilerplate with the
+    /// blocked one are not mistaken for retries.
+    pub fn record_block_anchored(
+        &mut self,
+        command: &str,
+        rule: &str,
+        keywords: Vec<String>,
+        anchors: Vec<String>,
+        tier: u8,
+    ) {
         self.block_history.push(BlockEvent {
             timestamp: chrono::Utc::now().to_rfc3339(),
             tool_call_count: self.tool_call_count,
             command: command.chars().take(500).collect(),
             rule: rule.to_string(),
             keywords: keywords.clone(),
+            anchors: anchors.clone(),
             tier,
         });
 
         // Enter heightened state: watch for keywords in next 3 tool calls
         self.heightened_until_call = Some(self.tool_call_count + 3);
         self.heightened_keywords = keywords;
+        self.heightened_anchors = anchors;
     }
 
     pub fn record_warning(&mut self) {

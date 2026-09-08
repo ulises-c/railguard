@@ -40,6 +40,18 @@ pub fn check_behavioral_evasion(state: &SessionState, cmd: &str) -> Option<Threa
     }
 
     let cmd_lower = cmd.to_lowercase();
+
+    // A block anchored on what its rule matched is only retried by a command
+    // that names one of those words again. Shared boilerplate is not a retry.
+    if !state.heightened_anchors.is_empty()
+        && !state
+            .heightened_anchors
+            .iter()
+            .any(|anchor| cmd_lower.contains(&anchor.to_lowercase()))
+    {
+        return None;
+    }
+
     let matched: Vec<String> = state
         .heightened_keywords
         .iter()
@@ -236,4 +248,42 @@ mod tests {
         let result = check_behavioral_evasion(&state, "npm test");
         assert!(result.is_none());
     }
+
+    // Observed 2026-09-08: a settings-file write in a Python heredoc was
+    // blocked, and the next unrelated Python heredoc was flagged as a retry
+    // because it shared interpreter boilerplate. Anchors require the retry to
+    // name what the rule matched.
+    #[test]
+    fn anchored_block_requires_a_retry_to_name_its_target() {
+        let mut state = SessionState::new("test");
+        state.tool_call_count = 10;
+        state.record_block_anchored(
+            "python3 - <<'PY'\nimport pathlib\npathlib.Path('/home/u/.claude/settings.json').write_text('{}')\nPY",
+            "railguard-tamper-settings",
+            vec![
+                "python3".into(),
+                "import".into(),
+                "pathlib".into(),
+                "claude/settings.json".into(),
+            ],
+            vec!["claude/settings.json".into()],
+            0,
+        );
+        state.tool_call_count = 11;
+
+        // Same boilerplate, different target: not a retry.
+        let unrelated =
+            "python3 - <<'PY'\nimport pathlib\nprint(pathlib.Path('README.md').read_text())\nPY";
+        assert!(check_behavioral_evasion(&state, unrelated).is_none());
+
+        // Naming the target again is.
+        let retry = "python3 -c \"import pathlib; pathlib.Path('/home/u/.claude/settings.json').write_text('{}')\"";
+        assert!(matches!(
+            check_behavioral_evasion(&state, retry),
+            Some(ThreatTier::Tier3 { .. })
+        ));
+    }
+
+    // `record_block` records no anchors, so `test_behavioral_evasion` above
+    // is also the "empty anchors keep the keyword rule" case.
 }

@@ -96,8 +96,9 @@ Changes take effect on the next tool call. Details:
 ## Do NOT attempt to
 
 - Run `railguard uninstall` - it will be blocked.
-- Modify `~/.claude/settings.json` - it will be blocked. (Reading it with a
-  plain read-only command is fine.)
+- Write to `~/.claude/settings.json` from Bash - it will be blocked unless the
+  user's allowlist grants it. Reading it, or merely naming the path in text (a
+  heredoc body written to another file, a grep pattern), is fine.
 - Remove the railguard binary - it will be blocked.
 - Access `~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc`, or other fenced paths (if
   path fencing is enabled).
