@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::path::Path;
 
+use railguard::types::HookClient;
 use railguard::{
     configure, context, coord, dashboard, hook, install, memory, policy, replay, snapshot, trace,
     update,
@@ -11,7 +12,7 @@ use railguard::{
 #[command(
     name = "railguard",
     version,
-    about = "A secure runtime for Claude Code."
+    about = "A secure runtime for Claude Code and Codex."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -20,10 +21,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Install railguard hooks into Claude Code
+    /// Install railguard hooks into Claude Code and Codex
     Install,
 
-    /// Remove railguard hooks from Claude Code
+    /// Remove railguard hooks from Claude Code and Codex
     Uninstall,
 
     /// Generate a starter railguard.yaml in the current directory
@@ -36,6 +37,15 @@ enum Commands {
     Hook {
         #[arg(long)]
         event: String,
+        #[arg(long, value_enum, default_value_t = HookClient::Auto)]
+        client: HookClient,
+    },
+
+    /// Clear a terminated session so it can run again
+    Resume {
+        /// Session to clear; omit to clear every terminated session here
+        #[arg(long)]
+        session: Option<String>,
     },
 
     /// Show recent trace logs
@@ -165,7 +175,8 @@ fn main() {
         Some(Commands::Uninstall) => cmd_uninstall(),
         Some(Commands::Init) => cmd_init(),
         Some(Commands::Guide) => cmd_guide(),
-        Some(Commands::Hook { event }) => hook::handler::run(&event),
+        Some(Commands::Hook { event, client }) => hook::handler::run(&event, client),
+        Some(Commands::Resume { session }) => cmd_resume(session),
         Some(Commands::Log { session, count }) => cmd_log(session, count),
         Some(Commands::Rollback {
             id,
@@ -213,7 +224,7 @@ fn cmd_install() -> i32 {
         Ok(msg) => {
             let rule_count = policy::defaults::default_blocklist().len();
 
-            println!("  {} Hooks registered with Claude Code", "✓".green().bold());
+            println!("  {} Hooks registered", "✓".green().bold());
             println!("  {} {}", "✓".green().bold(), msg);
             println!(
                 "  {} {} default rules active",
@@ -358,6 +369,87 @@ fn cmd_init() -> i32 {
 
 fn cmd_guide() -> i32 {
     print!("{}", include_str!("../defaults/GUIDE.md"));
+    0
+}
+
+fn cmd_resume(session: Option<String>) -> i32 {
+    use railguard::threat::state::SessionState;
+
+    // Resuming resets threat state, so it must be authorized through a channel the
+    // governed agent cannot reach. A TTY is not that channel — `script -qec` \
+    // manufactures one — and neither is a typed phrase, which pipes in. The
+    // self-protection rule blocking `railguard resume` is defense in depth only:
+    // one level of indirection (`R=$BIN; $R resume`) defeats any text pattern.
+    match railguard::install::hooks::confirm_via_dialog(
+        "Resume this Railguard session?\n\n\
+         This clears the termination and resets threat history for the project.",
+        "Resume",
+    ) {
+        Some(true) => {}
+        Some(false) => {
+            println!("  {} Cancelled", "●".cyan().bold());
+            return 0;
+        }
+        // Headless: refuse rather than fall back to something an agent can answer.
+        // Removing the state file by hand *is* an agent-proof path, because
+        // `railguard-protect-state` blocks every agent write under `.railguard`.
+        None => {
+            eprintln!(
+                "  {} No confirmation dialog available on this machine",
+                "✗".red().bold()
+            );
+            eprintln!();
+            eprintln!("  Clear the termination by hand instead:");
+            eprintln!("      rm .railguard/state/<session-id>.json");
+            eprintln!("  Agents are blocked from that path, so doing it yourself is the boundary.");
+            return 1;
+        }
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let state_dir = match &session {
+        Some(id) => SessionState::locate_state_dir(&cwd, id),
+        None => SessionState::find_project_root(&cwd).join(".railguard/state"),
+    };
+
+    let mut cleared: Vec<String> = Vec::new();
+
+    match session {
+        Some(id) => {
+            let mut state = SessionState::load(&state_dir, &id);
+            if !state.terminated {
+                println!("  {} Session {} is not terminated", "●".cyan().bold(), id);
+                return 0;
+            }
+            state.clear_termination();
+            if let Err(e) = state.save(&state_dir) {
+                eprintln!("  {} Could not clear {}: {}", "✗".red().bold(), id, e);
+                return 1;
+            }
+            cleared.push(id);
+        }
+        None => {
+            for mut state in SessionState::find_recent_terminations(&state_dir) {
+                let id = state.session_id.clone();
+                state.clear_termination();
+                match state.save(&state_dir) {
+                    Ok(()) => cleared.push(id),
+                    Err(e) => eprintln!("  {} Could not clear {}: {}", "✗".red().bold(), id, e),
+                }
+            }
+        }
+    }
+
+    if cleared.is_empty() {
+        println!("  {} No terminated sessions to resume", "●".cyan().bold());
+        return 0;
+    }
+
+    for id in &cleared {
+        println!("  {} Resumed session {}", "✓".green().bold(), id);
+    }
+    println!();
+    println!("  Threat state was reset. Re-run the agent; it will start from a clean slate.");
     0
 }
 
@@ -542,15 +634,9 @@ fn cmd_status() -> i32 {
     println!("{}", "railguard status".bold());
     println!();
 
-    match install::hooks::check_installed() {
-        Ok(true) => println!("  {} Hooks installed in Claude Code", "✓".green().bold()),
-        Ok(false) => println!(
-            "  {} Hooks not installed (run {})",
-            "✗".yellow().bold(),
-            "railguard install".cyan()
-        ),
-        Err(e) => println!("  {} Could not check hooks: {}", "?".yellow().bold(), e),
-    }
+    print_hook_status("Claude Code", install::hooks::check_claude_installed());
+    print_hook_status("Codex", install::hooks::check_codex_installed());
+    print_codex_activation_caveat();
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let loaded_policy = policy::loader::load_policy_or_defaults(&cwd);
@@ -569,6 +655,16 @@ fn cmd_status() -> i32 {
                     "off"
                 }
             );
+            // Built-in denies are unioned in, so the only way to lose one is to
+            // ask. Surface that: it is the difference between a hard block and
+            // an approvable prompt on somewhere like ~/.ssh.
+            if !loaded_policy.fence.denied_paths_remove.is_empty() {
+                println!(
+                    "       {} built-in denies removed by policy: {}",
+                    "!".red().bold(),
+                    loaded_policy.fence.denied_paths_remove.join(", ")
+                );
+            }
             println!(
                 "       trace: {}",
                 if loaded_policy.trace.enabled {
@@ -608,6 +704,44 @@ fn cmd_status() -> i32 {
 
     println!();
     0
+}
+
+/// A registered Codex hook is not the same as an enforcing one: Codex skips
+/// command hooks until the human has trusted them, and `[features] hooks = false`
+/// disables them outright. Say so, rather than letting a green check imply
+/// interception that may never happen.
+fn print_codex_activation_caveat() {
+    if !matches!(install::hooks::check_codex_installed(), Ok(true)) {
+        return;
+    }
+    match install::hooks::codex_hooks_feature_disabled() {
+        Some(true) => println!(
+            "       {} Codex has [features] hooks = false — registered hooks do NOT run",
+            "!".red().bold()
+        ),
+        _ => println!(
+            "       {} registered, not proven active: Codex skips command hooks until trusted",
+            "·".dimmed()
+        ),
+    }
+}
+
+fn print_hook_status(client: &str, status: Result<bool, String>) {
+    match status {
+        Ok(true) => println!("  {} {} hooks registered", "✓".green().bold(), client),
+        Ok(false) => println!(
+            "  {} {} hooks not installed (run {})",
+            "✗".yellow().bold(),
+            client,
+            "railguard install".cyan()
+        ),
+        Err(error) => println!(
+            "  {} Could not check {} hooks: {}",
+            "?".yellow().bold(),
+            client,
+            error
+        ),
+    }
 }
 
 fn cmd_locks() -> i32 {

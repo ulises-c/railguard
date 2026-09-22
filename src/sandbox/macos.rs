@@ -176,6 +176,7 @@ mod tests {
             allowed_paths: vec![],
             denied_paths: vec!["~/.ssh".to_string(), "~/.aws".to_string()],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         };
         let profile = generate_profile(&config, "/Users/test/project");
         assert!(profile.contains("(version 1)"));

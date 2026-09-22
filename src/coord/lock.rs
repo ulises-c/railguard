@@ -116,7 +116,7 @@ pub fn acquire(file_path: &str, session_id: &str) -> Result<(), LockConflict> {
         None => {
             // Can't read it — remove and retry once
             let _ = fs::remove_file(&lock_path);
-            return acquire(file_path, session_id);
+            return acquire_once(file_path, session_id);
         }
     };
 

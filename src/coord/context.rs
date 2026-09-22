@@ -53,7 +53,7 @@ pub fn check_file_conflict(file_path: &str, session_id: &str) -> Option<String> 
     match lock::acquire(file_path, session_id) {
         Ok(()) => None,
         Err(conflict) => Some(format!(
-            "⛔ {}\nAnother Claude Code session is editing this file. Wait for it to finish or use a different file.",
+            "⛔ {}\nAnother agent session is editing this file. Wait for it to finish or use a different file.",
             conflict
         )),
     }

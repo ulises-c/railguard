@@ -19,7 +19,7 @@ blocklist:
 
   - name: rm-rf-critical
     tool: Bash
-    pattern: "(?m)(^|[;&|]\\s*)rm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\\s+-f|-f\\s+-[rR]|--recursive\\s+--force|--force\\s+--recursive)\\s+(--\\s+)?([^;&|\\n]*\\s)?(/|/\\*|~/?|\\$HOME/?|\\$\\{HOME\\}/?|/home/?|/home/[^/\\s]+/?)(\\s|$|[;&|])"
+    pattern: "(?m)(^|[;&|]\\s*)rm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|-[rR]\\s+-f|-f\\s+-[rR]|-[rR]\\s+--force|--force\\s+-[rR]|--recursive\\s+--force|--force\\s+--recursive)\\s+(--\\s+)?([^;&|\\n]*\\s)?(/|/\\*|~/?|\\$HOME/?|\\$\\{HOME\\}/?|/home/?|/home/[^/\\s]+/?)(\\s|$|[;&|])"
     action: block
     message: "Blocked: recursive force delete of a filesystem or home root"
 
@@ -68,16 +68,37 @@ allowlist: []
 fence:
   enabled: true
   allowed_paths: []        # Empty = allow project directory only
-  allow_local_overrides: true   # On by default: a project-local
-                                # .railguard.local.yaml may ADD to allowed_paths
-                                # (additive only; denies always win). Set false
-                                # to disable. See docs/per-project-allowlist.md
+  allow_local_overrides: false  # Off by default: .railguard.local.yaml ships
+                                # inside the repository being guarded, so
+                                # honoring it here would let a clone opt itself
+                                # in. Turn on only in a policy you control.
+                                # See docs/per-project-allowlist.md
   denied_paths:
     - "~/.ssh"
     - "~/.aws"
     - "~/.gnupg"
     - "~/.config/gcloud"
+    # Agent config — blocked so the agent cannot disable Railguard's own hooks.
+    - "~/.claude"
+    - "~/.codex"
     - "/etc"
+    # Shell and login init files: a write here is arbitrary code execution on
+    # the human's next shell, so they rank with the credential stores rather
+    # than behind a mere out-of-project approval prompt.
+    - "~/.bashrc"
+    - "~/.bash_profile"
+    - "~/.profile"
+    - "~/.zshrc"
+    - "~/.zshenv"
+    - "~/.zprofile"
+    - "~/.config/fish"
+    # Same reachability, one indirection out: hook and alias surfaces that run
+    # on ordinary developer commands or at login.
+    - "~/.gitconfig"
+    - "~/.config/git"
+    - "~/.local/bin"
+    - "~/.config/systemd/user"
+    - "~/.config/autostart"
 
 # ── Trace ────────────────────────────────────────────────────────────
 # Structured audit log of every tool call.

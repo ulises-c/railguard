@@ -87,6 +87,23 @@ fn make_bash_input(session_id: &str, cwd: &str, command: &str) -> String {
     .to_string()
 }
 
+/// Simulate the human clicking *approve*: the tool then actually runs, and
+/// PostToolUse fires for the same `tool_use_id`. That completion is the only
+/// evidence that distinguishes approval from denial — a denied call never runs, so
+/// it never reaches PostToolUse.
+fn approve_pending(session_id: &str, cwd: &str) {
+    let post = serde_json::json!({
+        "session_id": session_id,
+        "cwd": cwd,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": "approved" },
+        "tool_use_id": "test-001"
+    })
+    .to_string();
+    simulate_hook(&railguard_binary(), "PostToolUse", &post);
+}
+
 fn output_contains_deny(stdout: &str) -> bool {
     stdout.contains("\"deny\"")
 }
@@ -199,9 +216,9 @@ fn tier1_approval_allows_subsequent_same_pattern() {
         stdout1
     );
 
-    // Simulate user approval by making a subsequent call
-    // (resolve_pending_approval runs at start of next call)
-    // The next call with a similar Tier 1 pattern should be allowed
+    approve_pending(&sid, cwd);
+
+    // The next call with the same Tier 1 pattern should be allowed
     let input2 = make_bash_input(&sid, cwd, "rev <<< 'another' | sh");
     let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
     assert!(
@@ -323,6 +340,44 @@ fn state_persists_across_invocations() {
     assert_eq!(state2["tool_call_count"], 2);
 }
 
+/// A human who clicks *deny* also goes on working. Approval used to be inferred
+/// from the arrival of any later tool call, so a denial became a session-wide
+/// allow for that pattern — the agent only had to make one unrelated call.
+#[test]
+fn a_denied_prompt_does_not_become_an_approval() {
+    let dir = create_test_dir();
+    let cwd = dir.path().to_str().unwrap();
+    let sid = unique_session_id();
+
+    let input1 = make_bash_input(&sid, cwd, "rev <<< 'test' | sh");
+    let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
+    assert!(output_contains_ask(&stdout1), "first should ask: {stdout1}");
+
+    // The human denies, so the tool never runs and no PostToolUse ever arrives.
+    // Unrelated work continues.
+    for command in ["echo one", "ls", "cat README.md"] {
+        let filler = make_bash_input(&sid, cwd, command);
+        simulate_hook(&railguard_binary(), "PreToolUse", &filler);
+    }
+
+    // The denied pattern must still be gated.
+    let input2 = make_bash_input(&sid, cwd, "rev <<< 'another' | sh");
+    let (_, stdout2, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input2);
+    assert!(
+        output_is_not_allowed(&stdout2),
+        "a denied pattern must not be allowed after unrelated calls: {stdout2}"
+    );
+
+    let state_path = dir.path().join(format!(".railguard/state/{}.json", sid));
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    let approvals = state["session_approvals"].as_array().unwrap();
+    assert!(
+        approvals.is_empty(),
+        "no approval should have been recorded, got: {approvals:?}"
+    );
+}
+
 #[test]
 fn session_approvals_persist_in_state() {
     let dir = create_test_dir();
@@ -340,9 +395,8 @@ fn session_approvals_persist_in_state() {
         serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
     assert!(state1["pending_approval"].is_string());
 
-    // Next call resolves the pending approval
-    let input2 = make_bash_input(&sid, cwd, "echo safe");
-    simulate_hook(&railguard_binary(), "PreToolUse", &input2);
+    // Only a completion of the asked-about call resolves the pending approval.
+    approve_pending(&sid, cwd);
 
     let state2: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
@@ -442,6 +496,8 @@ fn terminated_session_resumes_after_approval() {
     let input1 = make_bash_input(&sid, cwd, "echo hello");
     let (_, stdout1, _) = simulate_hook(&railguard_binary(), "PreToolUse", &input1);
     assert!(output_contains_ask(&stdout1), "should ask to resume");
+
+    approve_pending(&sid, cwd);
 
     // Second call: approval resolved, session should be clean
     let input2 = make_bash_input(&sid, cwd, "echo world");

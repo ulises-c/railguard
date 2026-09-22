@@ -7,7 +7,7 @@
 </div>
 
 <p align="center">
-  <strong>Safe runtime for Claude Code, built to be yours.</strong><br>
+  <strong>Safe runtime for Claude Code and Codex, built to be yours.</strong><br>
   <a href="https://railguard.tech">railguard.tech</a>
 </p>
 
@@ -33,7 +33,14 @@ cargo install --git https://github.com/ulises-c/railguard
 railguard install
 ```
 
-That's it. Keep using Claude exactly as before.
+That's it. Railguard registers with Claude Code and, when installed, Codex. In
+Codex, review the new hook definitions with `/hooks` before using them.
+
+Codex does not currently support interactive `ask` decisions from PreToolUse
+hooks. Railguard therefore fails closed: approval-gated calls are denied with
+an actionable explanation instead of producing a hook error and continuing.
+Because Codex also can't answer the resume prompt, a terminated session is
+revived from the terminal with `railguard resume`.
 
 ---
 
@@ -59,7 +66,7 @@ The same command can get different decisions depending on context:
 | | | |
 |---|---|---|
 | rm dist/bundle.js | inside project | ✅ allowed |
-| rm ~/.bashrc | outside project | ⚠️ asks you |
+| rm ~/.bashrc | outside project | ⛔ blocked |
 
 99% of commands flow through instantly. You only see Railguard when it matters.
 
@@ -71,8 +78,7 @@ Every tool call passes through Railguard, not just Bash.
 
 - **Bash** · command classification, pipe analysis, evasion detection
 - **Read** · sensitive path detection (~/.ssh, ~/.aws, .env, ...)
-- **Write** · path fencing + content inspection for secrets and dangerous payloads
-- **Edit** · path fencing + content inspection on replacements
+- **Write/Edit/apply_patch** · path fencing, snapshots, and policy checks
 - **Memory** · classification of agent memory writes for secrets, behavioral injection, tampering
 
 ---
@@ -124,7 +130,7 @@ allowlist:
 
 ## For your agent
 
-Drop [`templates/AGENTS.md`](templates/AGENTS.md) into your project to tell your coding agent how to work productively under Railguard — how to read allow/ask/block responses, why it must never retry a blocked command, how to stay on the right side of the path fence, and how to roll back. (`railguard install` also injects a short guardrails block into your `CLAUDE.md` automatically.)
+Drop [`templates/AGENTS.md`](templates/AGENTS.md) into your project to tell your coding agent how to work productively under Railguard — how to read allow/ask/block responses, why it must never retry a blocked command, how to stay on the right side of the path fence, and how to roll back. (`railguard install` also injects a short guardrails block into your `CLAUDE.md` automatically and installs Codex hooks when `~/.codex` exists.)
 
 ---
 

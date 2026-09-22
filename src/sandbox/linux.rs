@@ -141,6 +141,7 @@ mod tests {
             allowed_paths: vec![],
             denied_paths: vec!["~/.ssh".to_string()],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         };
         let cmd = generate_bwrap_command(&config, "/home/user/project");
         assert!(cmd.contains("bwrap"));
@@ -155,6 +156,7 @@ mod tests {
             allowed_paths: vec![],
             denied_paths: vec!["~/.ssh".to_string()],
             allow_local_overrides: false,
+            denied_paths_remove: vec![],
         };
         let code = generate_landlock_snippet(&config, "/home/user/project");
         assert!(code.contains("Landlock"));

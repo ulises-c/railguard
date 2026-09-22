@@ -5,7 +5,7 @@ This project runs under [Railguard](https://github.com/ulises-c/railguard), whic
 ## Reading the response
 
 - **allowed** — proceeds; you won't usually notice.
-- **ask** — the human approves or denies. Wait for the decision; don't route around it.
+- **ask** — in Claude Code, the human approves or denies. Wait for the decision; don't route around it. Codex cannot open approval prompts from hooks, so approval-gated calls arrive as denied with instructions to update policy first.
 - **blocked / denied** — refused. **Never retry the same command** — re-issuing it with cosmetic changes (new flags, base64, `eval`, a wrapper) trips behavioral-evasion detection and escalates toward a session kill. Find a genuinely different, safer approach, or ask the human. If the safer approach is legitimately different (e.g. pushing a *new* branch instead of force-pushing one), say so explicitly so the human can approve past any evasion flag.
 
 ## Rules it enforces
@@ -27,7 +27,7 @@ The Bash fence matches fenced path **strings** in the command, so a command that
 
 ## Self-protection
 
-Hard-blocked, and attempting them counts against you: `railguard uninstall`, editing `.claude/settings.json`, removing the railguard binary. Editing `railguard.yaml` is gated to **ask** — you *can* help tune policy: read it, propose an edit (the human approves), or run `railguard configure`. Changes take effect immediately, no restart needed.
+Hard-blocked, and attempting them counts against you: `railguard uninstall`, editing `.claude/settings.json` or anything under `~/.codex` (hook trust and the `hooks` feature flag live in `config.toml`, so the whole directory is fenced), launching a nested agent with hooks disabled, removing the railguard binary. Editing `railguard.yaml` requires human approval — Claude Code uses **ask**, while Codex denies the guarded edit until the human applies the proposal outside Codex. You *can* still help tune policy: read it, propose the exact edit, or suggest `railguard configure`. Changes take effect immediately, no restart needed.
 
 ## Widening file access for one project
 

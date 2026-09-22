@@ -751,6 +751,11 @@ fn leading_path(s: &str) -> Option<String> {
         3
     } else if s.starts_with('/') {
         1
+    } else if s.starts_with('~') {
+        // `~user/…`. Bash expands this to another account's home, so the word is
+        // a path operand even though it doesn't lead with `~/`. Omitting it kept
+        // `cat ~someone/.ssh/id_rsa` out of the fence entirely.
+        1
     } else {
         return None;
     };
